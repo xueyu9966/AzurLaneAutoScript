@@ -64,6 +64,12 @@ class AzurLaneAutoScript:
 
     def run(self, command, skip_first_screenshot=False):
         try:
+            from module.gg_modifier.modifier import on_task_start
+
+            on_task_start(self.config_name, command)
+        except Exception as e:
+            logger.warning(f"GGModifier: {e}")
+        try:
             if not skip_first_screenshot:
                 self.device.screenshot()
             self.__getattribute__(command)()
