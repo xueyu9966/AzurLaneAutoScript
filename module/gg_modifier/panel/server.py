@@ -278,14 +278,18 @@ def memory_state(pid, multiplier):
 
     # Prefer the state file written by the task hook: no adb reads while polling.
     state = alas_gg.load_json(os.path.join(alas_gg.DATA_DIR, "state.json"), {})
+    best = None
     for entry in (state.values() if isinstance(state, dict) else []):
         if not isinstance(entry, dict) or entry.get("pid") != pid:
             continue
+        if best is None or str(entry.get("time", "")) > str(best.get("time", "")):
+            best = entry
+    if best is not None:
         out["cached"] = True
-        if entry.get("mode") == "applied":
+        if best.get("mode") == "applied":
             out["mode"] = "applied"
-            out["value"] = entry.get("value", multiplier)
-        elif entry.get("mode") == "restored":
+            out["value"] = best.get("value", multiplier)
+        elif best.get("mode") == "restored":
             out["mode"] = "restored"
             out["value"] = 1.0
         return out
