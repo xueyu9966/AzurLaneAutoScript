@@ -345,7 +345,8 @@ def on_task_start(config_name, command):
             return
 
         state = _read_state().get(config_name) or {}
-        if state.get("pid") == pid and state.get("mode") == mode:
+        expected_state = "applied" if mode == "apply" else "restored"
+        if state.get("pid") == pid and state.get("mode") == expected_state:
             return
 
         value = float(cfg["Multiplier"])
