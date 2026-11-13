@@ -394,8 +394,11 @@ function renderInstances(s) {
     sel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
     sel.dataset.filled = key;
   }
-  if (s.selected && sel.value !== s.selected) sel.value = s.selected;
-  selectedConfig = sel.value || s.selected || "";
+  if (!selectedConfig && s.selected) selectedConfig = s.selected;
+  if (selectedConfig && !names.includes(selectedConfig)) {
+    selectedConfig = s.selected || "";
+  }
+  if (selectedConfig && sel.value !== selectedConfig) sel.value = selectedConfig;
   $("instanceHint").textContent = s.instance_serial ? ("设备 " + s.instance_serial) : "设备 auto";
   updateBindHint();
 }
