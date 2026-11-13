@@ -1,0 +1,32 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Every 2 hours at :17
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/LmeSzinc/AzurLaneAutoScript.git
+          git fetch upstream master
+          if ! git merge --no-edit upstream/master; then
+            git merge --abort
+            echo "::error::Merge conflict with upstream/master. Resolve manually in the fork."
+            exit 1
+          fi
+          git push origin master
