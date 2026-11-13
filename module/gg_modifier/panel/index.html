@@ -484,6 +484,12 @@ document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListene
 $("instanceSelect").addEventListener("change", () => {
   selectedConfig = $("instanceSelect").value;
   updateBindHint();
+  $("stAlas").textContent = "检查中…";
+  $("stAlas").className = "value dim";
+  $("stTask").textContent = "检查中…";
+  $("stTask").className = "value dim";
+  $("stMem").textContent = "—";
+  $("stMem").className = "value dim";
   refresh();
 });
 $("bindInstance").addEventListener("change", updateBindHint);

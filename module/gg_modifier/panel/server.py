@@ -286,7 +286,7 @@ def scheduler_running(log_dir, config_name=None):
         return None
     target = os.path.abspath(path)
     now = time.time()
-    if _SCHED_CACHE["path"] == target and now - _SCHED_CACHE["time"] < 5:
+    if _SCHED_CACHE["path"] == target and now - _SCHED_CACHE["time"] < 20:
         return _SCHED_CACHE["value"]
     found = False
     for proc in psutil.process_iter(["pid", "name"]):
@@ -625,6 +625,19 @@ def main():
     Handler.log_dir = args.log_dir
     Handler.alas_port = args.alas_port
     load_task_names(args.config)
+
+    # Warm the (slow) scheduler check in the background so the first page load
+    # does not wait for psutil.
+    def _warm():
+        try:
+            names = list_instances(args.config)
+            name = latest_instance(args.log_dir, names)
+            if name:
+                scheduler_running(args.log_dir, name)
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, daemon=True).start()
 
     if not os.path.exists(args.config):
         save_config(args.config, DEFAULT_CONFIG)
