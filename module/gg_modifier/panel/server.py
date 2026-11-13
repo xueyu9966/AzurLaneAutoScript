@@ -197,8 +197,37 @@ def latest_log(log_dir):
     return max(files, key=os.path.getmtime)
 
 
+def scheduler_running(log_dir):
+    """True if some process holds the latest scheduler log file open."""
+    try:
+        import psutil
+    except Exception:
+        return None
+    path = latest_log(log_dir)
+    if not path:
+        return None
+    target = os.path.abspath(path)
+    for proc in psutil.process_iter(["pid"]):
+        try:
+            for f in proc.open_files():
+                if os.path.abspath(f.path) == target:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 def alas_state(log_dir, port):
-    state = {"running": port_open(port), "task": None, "waiting": None, "log": None}
+    webui = port_open(port)
+    sched = scheduler_running(log_dir)
+    state = {
+        "running": webui if sched is None else sched,
+        "webui": webui,
+        "scheduler_known": sched is not None,
+        "task": None,
+        "waiting": None,
+        "log": None,
+    }
     path = latest_log(log_dir)
     if not path:
         return state
