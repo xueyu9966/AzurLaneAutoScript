@@ -207,7 +207,9 @@ def scheduler_running(log_dir):
     if not path:
         return None
     target = os.path.abspath(path)
-    for proc in psutil.process_iter(["pid"]):
+    for proc in psutil.process_iter(["pid", "name"]):
+        if (proc.info.get("name") or "").lower() not in ("python.exe", "python", "python3"):
+            continue
         try:
             for f in proc.open_files():
                 if os.path.abspath(f.path) == target:

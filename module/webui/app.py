@@ -130,6 +130,14 @@ def ensure_gg_panel() -> None:
             **kwargs,
         )
         logger.info("GG panel server started")
+        # Wait until the panel is accepting connections so the iframe loads cleanly.
+        for _ in range(40):
+            time.sleep(0.1)
+            try:
+                with socket.create_connection(("127.0.0.1", GG_PANEL_PORT), timeout=0.2):
+                    break
+            except OSError:
+                continue
     except Exception as e:
         logger.warning(f"Failed to start GG panel: {e}")
 
