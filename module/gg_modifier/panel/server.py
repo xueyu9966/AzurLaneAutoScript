@@ -20,6 +20,7 @@ import struct
 import sys
 import threading
 import time
+import urllib.parse
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -40,11 +41,13 @@ DEFAULT_TASKS_ON = [
 ]
 
 DEFAULT_CONFIG = {
-    "version": 2,
+    "version": 3,
     "Enable": True,
     "Mode": "auto",  # always_on | always_off | auto（按任务开关）
     "Multiplier": 555,
     "Tasks": {name: True for name in DEFAULT_TASKS_ON},
+    "Instance": "",
+    "Serial": "",
 }
 
 TASK_GROUPS = {
@@ -165,6 +168,8 @@ def normalize_config(data):
                 tasks[resolve_task(item)] = True
         # RestoreTasks entries are off by default and can be omitted.
     cfg["Tasks"] = tasks
+    cfg["Instance"] = str(cfg.get("Instance") or "").strip()
+    cfg["Serial"] = str(cfg.get("Serial") or "").strip()
     return cfg
 
 
@@ -187,9 +192,79 @@ def port_open(port, timeout=0.3):
         return False
 
 
-def latest_log(log_dir):
+def list_instances(config_path):
+    """ALAS config names (files under ./config, excluding templates/mods)."""
+    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
+    out = []
+    try:
+        for f in os.listdir(config_dir):
+            name, ext = os.path.splitext(f)
+            if ext != ".json" or "." in name or name.startswith("template"):
+                continue
+            out.append(name)
+    except OSError:
+        pass
+    return sorted(out)
+
+
+_SERIAL_CACHE = {}
+
+
+def instance_device(config_path, config_name):
+    """Return (serial or None, package) from the ALAS instance config."""
+    config_dir = os.path.dirname(os.path.dirname(os.path.abspath(config_path)))
+    serial = None
+    package = "com.bilibili.azurlane"
+    try:
+        with open(os.path.join(config_dir, f"{config_name}.json"), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        emu = data.get("Emulator", {}) if isinstance(data, dict) else {}
+        s = emu.get("Serial")
+        p = emu.get("PackageName")
+        if s and s != "auto":
+            serial = s
+        if p and p != "auto":
+            package = p
+    except (OSError, ValueError):
+        pass
+    if not serial:
+        # Fall back to the serial ALAS actually used, parsed from its log.
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(config_path))))
+        log_dir = os.path.join(root, "log")
+        try:
+            files = [
+                f for f in glob.glob(os.path.join(log_dir, f"*_{config_name}.txt"))
+                if not os.path.basename(f).endswith("_gui.txt")
+            ]
+            if files:
+                path = max(files, key=os.path.getmtime)
+                key = (path, os.path.getmtime(path))
+                if key in _SERIAL_CACHE:
+                    serial = _SERIAL_CACHE[key]
+                else:
+                    size = os.path.getsize(path)
+                    with open(path, "rb") as f:
+                        head = f.read(256 * 1024)
+                        tail = b""
+                        if size > 256 * 1024:
+                            f.seek(max(0, size - 2 * 1024 * 1024))
+                            tail = f.read()
+                    text = (head + b"\n" + tail).decode("utf-8", errors="replace")
+                    matches = re.findall(r"\[AdbDevice\]\s*AdbDevice\(serial=([^)\s]+)\)", text)
+                    serial = matches[-1] if matches else None
+                    _SERIAL_CACHE[key] = serial
+                    if len(_SERIAL_CACHE) > 20:
+                        _SERIAL_CACHE.clear()
+                        _SERIAL_CACHE[key] = serial
+        except OSError:
+            pass
+    return serial, package
+
+
+def latest_log(log_dir, config_name=None):
+    pattern = f"*_{config_name}.txt" if config_name else "*.txt"
     files = [
-        f for f in glob.glob(os.path.join(log_dir, "*.txt"))
+        f for f in glob.glob(os.path.join(log_dir, pattern))
         if not os.path.basename(f).endswith("_gui.txt")
     ]
     if not files:
@@ -200,13 +275,13 @@ def latest_log(log_dir):
 _SCHED_CACHE = {"path": None, "time": 0.0, "value": None}
 
 
-def scheduler_running(log_dir):
-    """True if some process holds the latest scheduler log file open."""
+def scheduler_running(log_dir, config_name=None):
+    """True if some process holds that instance's scheduler log file open."""
     try:
         import psutil
     except Exception:
         return None
-    path = latest_log(log_dir)
+    path = latest_log(log_dir, config_name)
     if not path:
         return None
     target = os.path.abspath(path)
@@ -230,18 +305,19 @@ def scheduler_running(log_dir):
     return found
 
 
-def alas_state(log_dir, port):
+def alas_state(log_dir, port, config_name=None):
     webui = port_open(port)
-    sched = scheduler_running(log_dir)
+    sched = scheduler_running(log_dir, config_name)
     state = {
         "running": webui if sched is None else sched,
         "webui": webui,
         "scheduler_known": sched is not None,
         "task": None,
         "waiting": None,
+        "last_task": None,
         "log": None,
     }
-    path = latest_log(log_dir)
+    path = latest_log(log_dir, config_name)
     if not path:
         return state
     state["log"] = os.path.basename(path)
@@ -267,10 +343,17 @@ def alas_state(log_dir, port):
         if m:
             state["waiting"] = {"until": m.group(1), "task": m.group(2)}
             break
+    if sched is False:
+        # Scheduler stopped: do not present the stale task as currently running.
+        state["last_task"] = state["task"] or (
+            state["waiting"]["task"] if state["waiting"] else None
+        )
+        state["task"] = None
+        state["waiting"] = None
     return state
 
 
-def memory_state(pid, multiplier):
+def memory_state(pid, multiplier, config_name=None):
     out = {"mode": "unknown", "value": None, "count": 0, "values": None, "cached": False}
     cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
     addrs = cache.get("addresses") or []
@@ -278,18 +361,27 @@ def memory_state(pid, multiplier):
 
     # Prefer the state file written by the task hook: no adb reads while polling.
     state = alas_gg.load_json(os.path.join(alas_gg.DATA_DIR, "state.json"), {})
-    best = None
-    for entry in (state.values() if isinstance(state, dict) else []):
-        if not isinstance(entry, dict) or entry.get("pid") != pid:
-            continue
-        if best is None or str(entry.get("time", "")) > str(best.get("time", "")):
-            best = entry
-    if best is not None:
+    entry = None
+    if config_name and isinstance(state, dict) and isinstance(state.get(config_name), dict):
+        cand = state[config_name]
+        if cand.get("pid") != pid:
+            # Selected instance has a stale entry (game restarted): unknown.
+            return out
+        entry = cand
+    else:
+        best = None
+        for value in (state.values() if isinstance(state, dict) else []):
+            if not isinstance(value, dict) or value.get("pid") != pid:
+                continue
+            if best is None or str(value.get("time", "")) > str(best.get("time", "")):
+                best = value
+        entry = best
+    if entry:
         out["cached"] = True
-        if best.get("mode") == "applied":
+        if entry.get("mode") == "applied":
             out["mode"] = "applied"
-            out["value"] = best.get("value", multiplier)
-        elif best.get("mode") == "restored":
+            out["value"] = entry.get("value", multiplier)
+        elif entry.get("mode") == "restored":
             out["mode"] = "restored"
             out["value"] = 1.0
         return out
@@ -309,38 +401,67 @@ def memory_state(pid, multiplier):
     return out
 
 
-def get_state(config_path, log_dir, alas_port):
+def get_state(config_path, log_dir, alas_port, config_name=None):
     cfg = load_config(config_path)
-    p = alas_gg.MemPatcher()
+    instances = list_instances(config_path)
+
+    if not config_name:
+        bound = cfg.get("Instance") or ""
+        if bound and bound in instances:
+            config_name = bound
+        else:
+            running = [n for n in instances if scheduler_running(log_dir, n)]
+            config_name = running[0] if running else (instances[0] if instances else None)
+
+    serial, package = (
+        instance_device(config_path, config_name)
+        if config_name
+        else (None, "com.bilibili.azurlane")
+    )
+    p = alas_gg.MemPatcher(serial=serial or alas_gg.DEFAULT_SERIAL, package=package)
     pid = None
     try:
         pid = p.get_pid()
     except Exception:
         pass
-    mem = memory_state(pid, float(cfg["Multiplier"])) if pid else {
+    mem = memory_state(pid, float(cfg["Multiplier"]), config_name) if pid else {
         "mode": "unknown", "value": None, "count": 0, "values": None, "cached": False,
     }
     return {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "config": cfg,
         "config_path": config_path,
-        "game": {"running": pid is not None, "pid": pid},
+        "instances": instances,
+        "selected": config_name,
+        "instance_serial": serial,
+        "game": {
+            "running": pid is not None,
+            "pid": pid,
+            "serial": serial or alas_gg.DEFAULT_SERIAL,
+        },
         "memory": mem,
-        "alas": alas_state(log_dir, alas_port),
+        "alas": alas_state(log_dir, alas_port, config_name),
         "task_groups": TASK_GROUPS,
         "task_names": TASK_DISPLAY,
     }
 
 
 # ---------------- actions ----------------
-def do_action(action, config_path):
+def do_action(action, config_path, config_name=None):
     cfg = load_config(config_path)
     value = float(cfg["Multiplier"])
+    serial, package = (
+        instance_device(config_path, config_name)
+        if config_name
+        else (None, "com.bilibili.azurlane")
+    )
+    serial = serial or alas_gg.DEFAULT_SERIAL
+
     # Short-circuit when already in the requested state.
     try:
-        probe = alas_gg.MemPatcher()
+        probe = alas_gg.MemPatcher(serial=serial, package=package)
         pid = probe.get_pid()
-        mem = memory_state(pid, value)
+        mem = memory_state(pid, value, config_name)
         if action == "apply" and mem["mode"] == "applied":
             return True, f"已经是修改状态（{value:g}）"
         if action == "restore" and mem["mode"] == "restored":
@@ -350,7 +471,7 @@ def do_action(action, config_path):
 
     buf = io.StringIO()
     with _ACTION_LOCK:
-        p = alas_gg.MemPatcher()
+        p = alas_gg.MemPatcher(serial=serial, package=package)
         try:
             if action == "apply":
                 with redirect_stdout(buf):
@@ -363,6 +484,24 @@ def do_action(action, config_path):
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
     text = buf.getvalue().strip()
+    if code == 0:
+        try:
+            pid = p.get_pid()
+            state_path = os.path.join(alas_gg.DATA_DIR, "state.json")
+            data = alas_gg.load_json(state_path, {})
+            data[config_name or "panel"] = {
+                "pid": pid,
+                "serial": serial,
+                "mode": "applied" if action == "apply" else "restored",
+                "value": value if action == "apply" else 1.0,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            tmp = state_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, state_path)
+        except Exception:
+            pass
     return code == 0, text or f"exit code {code}"
 
 
@@ -400,8 +539,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(500, "index.html not found", "text/plain; charset=utf-8")
             return
         if path == "/api/state":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            config_name = (qs.get("config") or [None])[0]
             try:
-                self._json(200, get_state(self.config_path, self.log_dir, self.alas_port))
+                self._json(200, get_state(self.config_path, self.log_dir, self.alas_port, config_name))
             except Exception as e:
                 self._json(500, {"error": f"{type(e).__name__}: {e}"})
             return
@@ -430,7 +571,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/action":
             action = body.get("action")
-            ok, message = do_action(action, self.config_path)
+            ok, message = do_action(action, self.config_path, body.get("config"))
             self._json(200 if ok else 500, {"ok": ok, "message": message})
             return
 

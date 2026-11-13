@@ -127,6 +127,10 @@
 
   <section class="card">
     <h2>运行状态</h2>
+    <div class="row" style="margin-bottom:14px">
+      <div class="field"><label for="instanceSelect">实例</label><select id="instanceSelect"></select></div>
+      <span class="hint" id="instanceHint"></span>
+    </div>
     <div class="status-grid">
       <div class="stat"><span class="label">游戏</span><span class="value" id="stGame">—</span></div>
       <div class="stat"><span class="label">内存状态</span><span class="value" id="stMem">—</span></div>
@@ -162,6 +166,10 @@
       <div class="field"><label for="multiplier">倍率</label><input type="number" id="multiplier" min="1" step="1"></div>
       <label class="switch"><input type="checkbox" id="enable"> 启用任务钩子</label>
     </div>
+    <div class="row" style="margin-top:14px">
+      <label class="switch"><input type="checkbox" id="bindInstance"> 仅绑定到当前实例运行</label>
+      <span class="hint" id="bindHint"></span>
+    </div>
   </section>
 
   <section class="card" id="autoSection">
@@ -191,6 +199,8 @@ let state = null;
 let formLoaded = false;
 let busy = false;
 let draftTasks = {};
+let selectedConfig = "";
+let currentSettings = {};
 
 function toast(msg, kind = "") {
   const el = $("toast");
@@ -258,10 +268,11 @@ function renderStatus(s) {
   $("stAlas").className = "value " + (a.running ? "good" : "dim");
 
   let task = "空闲";
-  if (a.task) task = "执行中：" + taskDisplay(a.task);
+  if (!a.running) task = "调度未运行";
+  else if (a.task) task = "执行中：" + taskDisplay(a.task);
   else if (a.waiting) task = "等待 " + taskDisplay(a.waiting.task) + " @ " + a.waiting.until;
   $("stTask").textContent = task;
-  $("stTask").className = "value " + (a.task ? "warn" : "dim");
+  $("stTask").className = "value " + (a.task ? "warn" : (a.running ? "dim" : "bad"));
 
   $("stAddr").textContent = m.count ? (m.count + " 个地址" + (m.cached ? "" : "（缓存失效）")) : "—";
   $("stTime").textContent = s.time || "—";
@@ -274,14 +285,17 @@ const EXCLUDE_TASKS = new Set([
 ]);
 
 function fillForm(cfg) {
+  currentSettings = Object.assign({}, cfg || {});
   for (const r of document.querySelectorAll('input[name="mode"]')) {
     r.checked = r.value === cfg.Mode;
   }
   $("multiplier").value = cfg.Multiplier;
   $("enable").checked = !!cfg.Enable;
+  $("bindInstance").checked = !!cfg.Instance;
   draftTasks = Object.assign({}, cfg.Tasks || {});
   renderTaskList();
   updateModeUI();
+  updateBindHint();
 }
 
 function groupTasks() {
@@ -344,12 +358,17 @@ function collectConfig() {
   const mode = document.querySelector('input[name="mode"]:checked');
   const tasks = {};
   for (const [t, v] of Object.entries(draftTasks)) if (v) tasks[t] = true;
+  const bind = $("bindInstance").checked;
   return {
-    version: 2,
+    version: 3,
     Enable: $("enable").checked,
     Mode: mode ? mode.value : "auto",
     Multiplier: Number($("multiplier").value) || 555,
     Tasks: tasks,
+    Instance: bind ? selectedConfig : "",
+    Serial: bind
+      ? ((state && state.instance_serial) || currentSettings.Serial || "")
+      : (currentSettings.Serial || ""),
   };
 }
 
@@ -360,11 +379,33 @@ function updateModeUI() {
   $("applyNow").disabled = !mode || mode.value === "auto";
 }
 
+function updateBindHint() {
+  $("bindHint").textContent = $("bindInstance").checked
+    ? ("钩子仅在 " + (selectedConfig || "未选择实例") + " 下运行")
+    : "不限制实例";
+}
+
+function renderInstances(s) {
+  const sel = $("instanceSelect");
+  const names = s.instances || [];
+  const key = names.join("|");
+  if (sel.dataset.filled !== key) {
+    sel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+    sel.dataset.filled = key;
+  }
+  if (s.selected && sel.value !== s.selected) sel.value = s.selected;
+  selectedConfig = sel.value || s.selected || "";
+  $("instanceHint").textContent = s.instance_serial ? ("设备 " + s.instance_serial) : "设备 auto";
+  updateBindHint();
+}
+
 async function refresh() {
   try {
-    const s = await api("/api/state");
+    const url = "/api/state" + (selectedConfig ? "?config=" + encodeURIComponent(selectedConfig) : "");
+    const s = await api(url);
     state = s;
     renderStatus(s);
+    renderInstances(s);
     $("conn").textContent = "已连接";
     $("conn").className = "pill on";
     if (!formLoaded) {
@@ -389,7 +430,7 @@ async function doAction(action) {
     const r = await api("/api/action", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
+      body: JSON.stringify({ action, config: selectedConfig }),
     });
     toast(r.message || "完成", "ok");
   } catch (e) {
@@ -415,6 +456,7 @@ async function save() {
       body: JSON.stringify(cfg),
     });
     toast("设置已保存", "ok");
+    currentSettings = Object.assign({}, r.config || {});
     draftTasks = Object.assign({}, r.config.Tasks || {});
     renderTaskList();
     if ($("applyNow").checked && (cfg.Mode === "always_on" || cfg.Mode === "always_off")) {
@@ -432,6 +474,12 @@ async function save() {
 
 // events
 document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", updateModeUI));
+$("instanceSelect").addEventListener("change", () => {
+  selectedConfig = $("instanceSelect").value;
+  updateBindHint();
+  refresh();
+});
+$("bindInstance").addEventListener("change", updateBindHint);
 $("btnApply").addEventListener("click", () => doAction("apply"));
 $("btnRestore").addEventListener("click", () => doAction("restore"));
 $("btnRefresh").addEventListener("click", refresh);

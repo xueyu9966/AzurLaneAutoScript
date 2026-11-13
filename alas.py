@@ -66,7 +66,16 @@ class AzurLaneAutoScript:
         try:
             from module.gg_modifier.modifier import on_task_start
 
-            on_task_start(self.config_name, command)
+            serial = None
+            package = None
+            try:
+                serial = self.config.Emulator_Serial
+                if serial in ("", "auto", None):
+                    serial = getattr(self.device, "serial", None)
+                package = getattr(self.device, "package", None)
+            except Exception:
+                pass
+            on_task_start(self.config_name, command, serial=serial, package=package)
         except Exception as e:
             logger.warning(f"GGModifier: {e}")
         try:

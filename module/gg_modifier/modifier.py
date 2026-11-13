@@ -12,8 +12,10 @@ Mid-task: when the dock fills up, ALAS enters retirement / enhancement.
 GG-modified stats break enhancement, so those two handlers are wrapped:
 restore right before them, re-apply right after they finish.
 """
+import glob
 import json
 import os
+import re
 import struct
 import subprocess
 import time
@@ -36,11 +38,15 @@ DEFAULT_TASKS_ON = [
 ]
 
 DEFAULT_CONFIG = {
-    "version": 2,
+    "version": 3,
     "Enable": True,
     "Mode": "auto",
     "Multiplier": 555,
     "Tasks": {name: True for name in DEFAULT_TASKS_ON},
+    # Bind to one ALAS instance (config name). Empty = any instance.
+    "Instance": "",
+    # Explicit adb serial for this instance. Empty = read from the ALAS config.
+    "Serial": "",
 }
 
 
@@ -84,7 +90,7 @@ def load_config():
         data = {}
     cfg = dict(DEFAULT_CONFIG)
     if isinstance(data, dict):
-        for k in ("Enable", "Mode", "Multiplier", "version"):
+        for k in ("Enable", "Mode", "Multiplier", "version", "Instance", "Serial"):
             if k in data:
                 cfg[k] = data[k]
     if cfg.get("Mode") not in ("always_on", "always_off", "auto"):
@@ -124,6 +130,42 @@ def decide(command, cfg):
     return "apply" if cfg.get("Tasks", {}).get(name, False) else "restore"
 
 
+_SERIAL_CACHE = {}
+
+
+def _serial_from_log(config_name):
+    """Read the serial ALAS actually used for this instance from its log."""
+    if config_name in _SERIAL_CACHE:
+        return _SERIAL_CACHE[config_name]
+    log_dir = os.path.join(ALAS_ROOT, "log")
+    try:
+        files = [
+            f for f in glob.glob(os.path.join(log_dir, f"*_{config_name}.txt"))
+            if not os.path.basename(f).endswith("_gui.txt")
+        ]
+    except Exception:
+        return None
+    if not files:
+        return None
+    path = max(files, key=os.path.getmtime)
+    try:
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            head = f.read(256 * 1024)
+            if size > 256 * 1024:
+                f.seek(max(0, size - 2 * 1024 * 1024))
+                tail = f.read()
+            else:
+                tail = b""
+        text = (head + b"\n" + tail).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    matches = re.findall(r"\[AdbDevice\]\s*AdbDevice\(serial=([^)\s]+)\)", text)
+    serial = matches[-1] if matches else None
+    _SERIAL_CACHE[config_name] = serial
+    return serial
+
+
 def _device_info(config_name):
     serial, package = "auto", "auto"
     path = os.path.join(ALAS_CONFIG_DIR, f"{config_name}.json")
@@ -137,20 +179,46 @@ def _device_info(config_name):
         pass
     if package == "auto":
         package = "com.bilibili.azurlane"
+    if serial in ("", "auto", None):
+        serial = _serial_from_log(config_name) or serial
     return serial, package
 
 
-def _auto_serial(adb):
+def _adb_devices(adb):
     try:
         out = subprocess.run(
             [adb, "devices"], capture_output=True, text=True, timeout=10
         ).stdout
-        for line in out.splitlines():
-            if "\tdevice" in line:
-                return line.split("\t")[0].strip()
+        return [
+            line.split("\t")[0].strip()
+            for line in out.splitlines()
+            if "\tdevice" in line
+        ]
     except Exception:
-        pass
-    return alas_gg.DEFAULT_SERIAL
+        return []
+
+
+def _patcher(config_name, cfg, serial=None, package=None):
+    cfg_serial, cfg_package = _device_info(config_name)
+    if cfg.get("Serial"):
+        serial = cfg["Serial"]
+    if not serial:
+        serial = cfg_serial
+    if not package:
+        package = cfg_package
+    adb = alas_gg.DEFAULT_ADB
+    if serial in ("", "auto", None):
+        devices = _adb_devices(adb)
+        if len(devices) == 1:
+            serial = devices[0]
+        elif not devices:
+            raise RuntimeError("no adb device")
+        else:
+            raise RuntimeError(
+                "multiple adb devices and no explicit Serial; "
+                "set a per-instance Serial in gg_modifier settings"
+            )
+    return alas_gg.MemPatcher(adb=adb, serial=serial, package=package)
 
 
 def _read_state():
@@ -162,10 +230,11 @@ def _read_state():
         return {}
 
 
-def _write_state(config_name, pid, mode, value):
+def _write_state(config_name, pid, mode, value, serial=None):
     data = _read_state()
     data[config_name] = {
         "pid": pid,
+        "serial": serial,
         "mode": mode,
         "value": value,
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -177,14 +246,6 @@ def _write_state(config_name, pid, mode, value):
         os.replace(tmp, STATE_PATH)
     except OSError as e:
         logger.warning(f"GGModifier: cannot write state: {e}")
-
-
-def _patcher(config_name):
-    serial, package = _device_info(config_name)
-    adb = alas_gg.DEFAULT_ADB
-    if serial in ("", "auto"):
-        serial = _auto_serial(adb)
-    return alas_gg.MemPatcher(adb=adb, serial=serial, package=package)
 
 
 def _verify(p, pid, addresses, expected):
@@ -296,15 +357,17 @@ def _restore_for_midtask(config_name):
         cfg = load_config()
         if not cfg.get("Enable", True):
             return False
+        if cfg.get("Instance") and _norm(cfg["Instance"]) != _norm(config_name):
+            return False
         state = _read_state().get(config_name) or {}
         if state.get("mode") != "applied":
             return False
-        p = _patcher(config_name)
+        p = _patcher(config_name, cfg, serial=state.get("serial"))
         pid = p.get_pid()
         value = float(cfg["Multiplier"])
         logger.info(f"GGModifier: mid-task restore before retire/enhance")
         _restore(p, pid, value)
-        _write_state(config_name, pid, "restored", value)
+        _write_state(config_name, pid, "restored", value, p.serial)
         return True
     except Exception as e:
         logger.warning(f"GGModifier: mid-task restore failed: {e}")
@@ -314,21 +377,27 @@ def _restore_for_midtask(config_name):
 def _apply_after_midtask(config_name):
     try:
         cfg = load_config()
-        p = _patcher(config_name)
+        if cfg.get("Instance") and _norm(cfg["Instance"]) != _norm(config_name):
+            return
+        state = _read_state().get(config_name) or {}
+        p = _patcher(config_name, cfg, serial=state.get("serial"))
         pid = p.get_pid()
         value = float(cfg["Multiplier"])
         logger.info(f"GGModifier: mid-task re-apply after retire/enhance")
         _apply(p, pid, value)
-        _write_state(config_name, pid, "applied", value)
+        _write_state(config_name, pid, "applied", value, p.serial)
     except Exception as e:
         logger.warning(f"GGModifier: mid-task re-apply failed: {e}")
 
 
-def on_task_start(config_name, command):
+def on_task_start(config_name, command, serial=None, package=None):
     """Called at the beginning of AzurLaneAutoScript.run()."""
     global _CURRENT_CONFIG
     try:
         cfg = load_config()
+        if cfg.get("Instance") and _norm(cfg["Instance"]) != _norm(config_name):
+            logger.info(f"GGModifier: bound to `{cfg['Instance']}`, skip `{config_name}`")
+            return
         if cfg.get("Enable", True):
             _CURRENT_CONFIG = config_name
             _install_midtask_hooks()
@@ -337,7 +406,7 @@ def on_task_start(config_name, command):
         if mode is None:
             return
 
-        p = _patcher(config_name)
+        p = _patcher(config_name, cfg, serial=serial, package=package)
         try:
             pid = p.get_pid()
         except Exception:
@@ -346,16 +415,20 @@ def on_task_start(config_name, command):
 
         state = _read_state().get(config_name) or {}
         expected_state = "applied" if mode == "apply" else "restored"
-        if state.get("pid") == pid and state.get("mode") == expected_state:
+        if (
+            state.get("pid") == pid
+            and state.get("mode") == expected_state
+            and (not state.get("serial") or state.get("serial") == p.serial)
+        ):
             return
 
         value = float(cfg["Multiplier"])
         logger.info(f"GGModifier: task `{command}` -> {mode}")
         if mode == "apply":
             _apply(p, pid, value)
-            _write_state(config_name, pid, "applied", value)
+            _write_state(config_name, pid, "applied", value, p.serial)
         else:
             _restore(p, pid, value)
-            _write_state(config_name, pid, "restored", value)
+            _write_state(config_name, pid, "restored", value, p.serial)
     except Exception as e:
         logger.warning(f"GGModifier: {type(e).__name__}: {e}")
