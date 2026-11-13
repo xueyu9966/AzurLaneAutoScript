@@ -201,6 +201,7 @@ let busy = false;
 let draftTasks = {};
 let selectedConfig = "";
 let currentSettings = {};
+let refreshSeq = 0;
 
 function toast(msg, kind = "") {
   const el = $("toast");
@@ -400,9 +401,11 @@ function renderInstances(s) {
 }
 
 async function refresh() {
+  const seq = ++refreshSeq;
   try {
     const url = "/api/state" + (selectedConfig ? "?config=" + encodeURIComponent(selectedConfig) : "");
     const s = await api(url);
+    if (seq !== refreshSeq) return;
     state = s;
     renderStatus(s);
     renderInstances(s);
@@ -413,6 +416,7 @@ async function refresh() {
       formLoaded = true;
     }
   } catch (e) {
+    if (seq !== refreshSeq) return;
     $("conn").textContent = "连接失败";
     $("conn").className = "pill off";
   }
