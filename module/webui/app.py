@@ -1,6 +1,10 @@
 import argparse
 import json
+import os
 import queue
+import socket
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -95,6 +99,39 @@ patch_executor()
 patch_mimetype()
 fix_py37_subprocess_communicate()
 task_handler = TaskHandler()
+
+GG_PANEL_PORT = 22333
+
+
+def ensure_gg_panel() -> None:
+    """Start the local GG control panel if it is not already running."""
+    try:
+        with socket.create_connection(("127.0.0.1", GG_PANEL_PORT), timeout=0.3):
+            return
+    except OSError:
+        pass
+
+    server = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "gg_modifier", "panel", "server.py")
+    )
+    if not os.path.isfile(server):
+        logger.warning(f"GG panel server not found: {server}")
+        return
+
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        subprocess.Popen(
+            [sys.executable, server, "--port", str(GG_PANEL_PORT)],
+            cwd=os.path.dirname(server),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
+        logger.info("GG panel server started")
+    except Exception as e:
+        logger.warning(f"Failed to start GG panel: {e}")
 
 
 class AlasGUI(Frame):
@@ -776,6 +813,12 @@ class AlasGUI(Frame):
             color="menu",
         ).style(f"--menu-Utils--")
 
+        put_button(
+            label="GG 倍率",
+            onclick=self.dev_gg_modifier,
+            color="menu",
+        ).style("--menu-GGModifier--")
+
     def dev_translate(self) -> None:
         go_app("translate", new_window=True)
         lang.TRANSLATE_MODE = True
@@ -966,6 +1009,21 @@ class AlasGUI(Frame):
                 toast("Reload not enabled", color="error")
 
         put_button(label="Force restart", onclick=_force_restart)
+
+    @use_scope("content", clear=True)
+    def dev_gg_modifier(self) -> None:
+        self.init_menu(name="GGModifier")
+        self.set_title("GG 倍率")
+        ensure_gg_panel()
+        put_html(
+            '<iframe id="gg-panel-frame" src="http://127.0.0.1:22333/" '
+            'style="width:100%;height:calc(100vh - 130px);min-height:620px;'
+            'border:0;border-radius:12px;background:#0b0e17"></iframe>'
+        )
+        run_js(
+            'var f=document.getElementById("gg-panel-frame");'
+            'if(f&&window.location.hostname){f.src="http://"+window.location.hostname+":22333/";}'
+        )
 
     @use_scope("content", clear=True)
     def dev_remote(self) -> None:
@@ -1446,6 +1504,7 @@ def debug():
 
 def startup():
     State.init()
+    ensure_gg_panel()
     lang.reload()
     updater.event = State.manager.Event()
     if updater.delay > 0:

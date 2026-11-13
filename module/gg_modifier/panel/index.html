@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ALAS × GG 倍率控制台</title>
+<style>
+  :root {
+    --bg: #0b0e17;
+    --card: #121726;
+    --card2: #171d30;
+    --line: #242c44;
+    --text: #e8ecf8;
+    --muted: #8b94ad;
+    --accent: #7c5cff;
+    --accent2: #4cc9f0;
+    --good: #3ddc97;
+    --warn: #ffb454;
+    --bad: #ff5c7a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 10% -10%, rgba(124,92,255,.22), transparent 60%),
+      radial-gradient(900px 500px at 110% 10%, rgba(76,201,240,.14), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  .app { max-width: 1080px; margin: 0 auto; padding: 28px 20px 64px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
+  .title { font-size: 22px; font-weight: 700; letter-spacing: .3px; }
+  .title small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+  .pill { font-size: 12px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); background: rgba(255,255,255,.02); white-space: nowrap; }
+  .pill.on { color: var(--good); border-color: rgba(61,220,151,.35); }
+  .pill.off { color: var(--bad); border-color: rgba(255,92,122,.35); }
+  .card { background: linear-gradient(180deg, var(--card), var(--card2)); border: 1px solid var(--line); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+  h2 { font-size: 15px; margin: 0 0 14px; color: #cfd6ea; font-weight: 600; letter-spacing: .2px; }
+  .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 20px; }
+  .stat .label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
+  .stat .value { font-size: 15px; font-weight: 600; }
+  .value.good { color: var(--good); }
+  .value.cool { color: var(--accent2); }
+  .value.warn { color: var(--warn); }
+  .value.bad { color: var(--bad); }
+  .value.dim { color: var(--muted); font-weight: 400; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .btn { appearance: none; border: 1px solid var(--line); background: #1a2136; color: var(--text); padding: 9px 16px; border-radius: 10px; font: inherit; font-weight: 600; cursor: pointer; transition: .15s; }
+  .btn:hover { border-color: #3a4668; transform: translateY(-1px); }
+  .btn:active { transform: translateY(0); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+  .btn.primary { background: linear-gradient(135deg, var(--accent), #5b8cff); border-color: transparent; }
+  .btn.danger { background: linear-gradient(135deg, #e0455f, #ff7a8a); border-color: transparent; }
+  .btn.ghost { background: transparent; color: var(--muted); }
+  .btn.big { padding: 12px 26px; font-size: 15px; }
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .mode { position: relative; cursor: pointer; }
+  .mode input { position: absolute; opacity: 0; inset: 0; }
+  .mode .box { border: 1px solid var(--line); background: #151b2c; border-radius: 14px; padding: 16px; height: 100%; transition: .15s; }
+  .mode .box b { display: block; font-size: 15px; margin-bottom: 6px; }
+  .mode .box small { color: var(--muted); font-size: 12px; line-height: 1.45; display: block; }
+  .mode input:checked + .box { border-color: var(--accent); background: linear-gradient(180deg, rgba(124,92,255,.18), rgba(124,92,255,.05)); box-shadow: 0 0 0 1px rgba(124,92,255,.35) inset; }
+  .mode:hover .box { border-color: #3a4668; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .row + .row { margin-top: 14px; }
+  .field { display: flex; align-items: center; gap: 10px; }
+  .field label { color: var(--muted); font-size: 13px; }
+  input[type=number], input[type=text], select {
+    background: #0f1422; border: 1px solid var(--line); color: var(--text);
+    border-radius: 10px; padding: 9px 12px; font: inherit; outline: none;
+  }
+  input[type=number] { width: 120px; }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124,92,255,.18); }
+  .switch { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; cursor: pointer; user-select: none; }
+  .switch input { width: 18px; height: 18px; accent-color: var(--accent); }
+  .task-toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .task-toolbar input { flex: 1; min-width: 180px; }
+  .task-list { display: flex; flex-direction: column; gap: 10px; }
+  .task-group { border: 1px solid var(--line); border-radius: 14px; background: #101524; overflow: hidden; }
+  .task-group > summary { list-style: none; cursor: pointer; display: flex; align-items: center; justify-content: space-between; padding: 13px 16px; user-select: none; }
+  .task-group > summary::-webkit-details-marker { display: none; }
+  .task-group > summary::before { content: "▸"; color: var(--muted); margin-right: 8px; transition: .15s; }
+  .task-group[open] > summary::before { transform: rotate(90deg); }
+  .task-group > summary .g-name { flex: 1; font-weight: 600; font-size: 13px; }
+  .task-group > summary .g-count { color: var(--muted); font-size: 12px; }
+  .task-rows { border-top: 1px solid var(--line); }
+  .task-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,.04); }
+  .task-row:last-child { border-bottom: 0; }
+  .task-row:hover { background: rgba(255,255,255,.02); }
+  .task-label { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+  .t-name { font-size: 14px; font-weight: 600; }
+  .t-orig { font-size: 11px; color: var(--muted); font-family: Consolas, monospace; }
+  .toggle { position: relative; display: inline-block; width: 46px; height: 26px; flex: 0 0 auto; }
+  .toggle input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 2; }
+  .toggle .track { position: absolute; inset: 0; background: #2a3350; border-radius: 999px; transition: .18s; }
+  .toggle .track::after { content: ""; position: absolute; width: 20px; height: 20px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .18s; box-shadow: 0 1px 3px rgba(0,0,0,.45); }
+  .toggle input:checked + .track { background: var(--accent); }
+  .toggle input:checked + .track::after { transform: translateX(20px); }
+  .toggle input:focus-visible + .track { box-shadow: 0 0 0 3px rgba(124,92,255,.28); }
+  .empty { color: #5d6883; font-size: 12px; padding: 6px 2px; }
+  footer { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 6px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  #autoSection.disabled { opacity: .55; }
+  #autoSection.disabled .task-panel, #autoSection.disabled .other { pointer-events: none; }
+  .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px); background: #1d2540; border: 1px solid var(--line); color: var(--text); padding: 12px 20px; border-radius: 12px; box-shadow: 0 12px 40px rgba(0,0,0,.45); opacity: 0; transition: .25s; pointer-events: none; z-index: 9; max-width: 80vw; }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.ok { border-color: rgba(61,220,151,.45); }
+  .toast.err { border-color: rgba(255,92,122,.5); }
+  .spin { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  @media (max-width: 760px) {
+    .status-grid { grid-template-columns: repeat(2, 1fr); }
+    .modes, .task-cols { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="title">ALAS × GameGuardian 倍率控制台
+      <small id="configPath">加载中…</small>
+    </div>
+    <div class="pill" id="conn">连接中…</div>
+  </header>
+
+  <section class="card">
+    <h2>运行状态</h2>
+    <div class="status-grid">
+      <div class="stat"><span class="label">游戏</span><span class="value" id="stGame">—</span></div>
+      <div class="stat"><span class="label">内存状态</span><span class="value" id="stMem">—</span></div>
+      <div class="stat"><span class="label">ALAS 调度</span><span class="value" id="stAlas">—</span></div>
+      <div class="stat"><span class="label">当前任务</span><span class="value" id="stTask">—</span></div>
+      <div class="stat"><span class="label">目标地址</span><span class="value dim" id="stAddr">—</span></div>
+      <div class="stat"><span class="label">最后刷新</span><span class="value dim" id="stTime">—</span></div>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="btnApply">立即修改</button>
+      <button class="btn danger" id="btnRestore">立即还原</button>
+      <button class="btn ghost" id="btnRefresh">刷新状态</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>切换模式</h2>
+    <div class="modes">
+      <label class="mode">
+        <input type="radio" name="mode" value="always_on">
+        <div class="box"><b>常开</b><small>每个任务开始前确保处于修改状态</small></div>
+      </label>
+      <label class="mode">
+        <input type="radio" name="mode" value="always_off">
+        <div class="box"><b>常关</b><small>每个任务开始前确保处于未修改状态</small></div>
+      </label>
+      <label class="mode">
+        <input type="radio" name="mode" value="auto">
+        <div class="box"><b>按任务</b><small>默认关闭，只打开你选的任务</small></div>
+      </label>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <div class="field"><label for="multiplier">倍率</label><input type="number" id="multiplier" min="1" step="1"></div>
+      <label class="switch"><input type="checkbox" id="enable"> 启用任务钩子</label>
+    </div>
+  </section>
+
+  <section class="card" id="autoSection">
+    <div class="sec-head">
+      <h2>按任务开关</h2>
+      <span class="hint">打开 = 该任务修改倍率；关闭 = 该任务还原为 1.0</span>
+    </div>
+    <div class="task-toolbar">
+      <input id="taskFilter" placeholder="搜索任务…">
+      <button class="btn ghost" id="toggleExpand">收起全部</button>
+    </div>
+    <div id="taskList" class="task-list"></div>
+  </section>
+
+  <footer>
+    <button class="btn primary big" id="btnSave">保存设置</button>
+    <label class="switch"><input type="checkbox" id="applyNow" checked> 保存后立即应用模式（常开→修改 / 常关→还原）</label>
+    <span class="hint" id="saveHint"></span>
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let state = null;
+let formLoaded = false;
+let busy = false;
+let draftTasks = {};
+
+function toast(msg, kind = "") {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "toast show " + kind;
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = "toast"; }, 3200);
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || data.message || ("HTTP " + r.status));
+  return data;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+function normTask(s) {
+  return String(s || "").trim().toLowerCase().replace(/_/g, "").replace(/\s+/g, "");
+}
+
+function taskDisplay(name) {
+  const names = (state && state.task_names) || {};
+  return names[name] || name;
+}
+
+function resolveTaskName(name) {
+  name = String(name || "").trim();
+  if (!name) return "";
+  const names = (state && state.task_names) || {};
+  if (names[name]) return name;
+  const target = normTask(name);
+  for (const [orig, disp] of Object.entries(names)) {
+    if (normTask(orig) === target || normTask(disp) === target) return orig;
+  }
+  return name;
+}
+
+function renderStatus(s) {
+  const g = s.game || {};
+  $("stGame").textContent = g.running ? ("运行中 · PID " + g.pid) : "未运行";
+  $("stGame").className = "value " + (g.running ? "good" : "bad");
+
+  const m = s.memory || {};
+  const memEl = $("stMem");
+  if (m.mode === "applied") {
+    memEl.textContent = "已修改 · " + m.value;
+    memEl.className = "value good";
+  } else if (m.mode === "restored") {
+    memEl.textContent = "未修改 · 1.0";
+    memEl.className = "value cool";
+  } else if (m.mode === "mixed") {
+    memEl.textContent = "部分修改（需检查）";
+    memEl.className = "value warn";
+  } else {
+    memEl.textContent = "未知（尚未扫描）";
+    memEl.className = "value dim";
+  }
+
+  const a = s.alas || {};
+  $("stAlas").textContent = a.running ? "运行中" : "未运行";
+  $("stAlas").className = "value " + (a.running ? "good" : "dim");
+
+  let task = "空闲";
+  if (a.task) task = "执行中：" + taskDisplay(a.task);
+  else if (a.waiting) task = "等待 " + taskDisplay(a.waiting.task) + " @ " + a.waiting.until;
+  $("stTask").textContent = task;
+  $("stTask").className = "value " + (a.task ? "warn" : "dim");
+
+  $("stAddr").textContent = m.count ? (m.count + " 个地址" + (m.cached ? "" : "（缓存失效）")) : "—";
+  $("stTime").textContent = s.time || "—";
+  $("configPath").textContent = s.config_path || "";
+}
+
+const EXCLUDE_TASKS = new Set([
+  "Alas", "General", "Restart", "EventGeneral", "OpsiGeneral", "IslandGeneral",
+  "Benchmark", "GameManager", "AzurLaneUncensored", "Daemon",
+]);
+
+function fillForm(cfg) {
+  for (const r of document.querySelectorAll('input[name="mode"]')) {
+    r.checked = r.value === cfg.Mode;
+  }
+  $("multiplier").value = cfg.Multiplier;
+  $("enable").checked = !!cfg.Enable;
+  draftTasks = Object.assign({}, cfg.Tasks || {});
+  renderTaskList();
+  updateModeUI();
+}
+
+function groupTasks() {
+  const names = (state && state.task_names) || {};
+  const groups = (state && state.task_groups) || {};
+  const used = new Set();
+  const out = [];
+  for (const [g, arr] of Object.entries(groups)) {
+    const items = arr.filter((t) => !EXCLUDE_TASKS.has(t));
+    items.forEach((t) => used.add(t));
+    if (items.length) out.push([g, items]);
+  }
+  const extra = Object.keys(names).filter((t) => !used.has(t) && !EXCLUDE_TASKS.has(t));
+  if (extra.length) out.push(["其他", extra]);
+  return out;
+}
+
+function renderTaskList() {
+  const box = $("taskList");
+  const groups = groupTasks();
+  if (!groups.length) {
+    box.innerHTML = '<span class="empty">等待任务列表…</span>';
+    return;
+  }
+  box.innerHTML = groups.map(([g, arr], gi) => {
+    const rows = arr.map((t) => {
+      const display = taskDisplay(t);
+      const search = (display + " " + t).toLowerCase();
+      return `<div class="task-row" data-search="${esc(search)}">
+        <div class="task-label"><span class="t-name">${esc(display)}</span><span class="t-orig">${esc(t)}</span></div>
+        <label class="toggle"><input type="checkbox" data-task="${esc(t)}" ${draftTasks[t] ? "checked" : ""}><span class="track"></span></label>
+      </div>`;
+    }).join("");
+    return `<details class="task-group" ${gi === 0 ? "open" : ""}>
+      <summary><span class="g-name">${esc(g)}</span><span class="g-count"></span></summary>
+      <div class="task-rows">${rows}</div>
+    </details>`;
+  }).join("");
+  updateCounts();
+  updateExpandLabel();
+  box.querySelectorAll(".task-group").forEach((g) => g.addEventListener("toggle", updateExpandLabel));
+}
+
+function updateCounts() {
+  document.querySelectorAll(".task-group").forEach((g) => {
+    const boxes = g.querySelectorAll("input[data-task]");
+    const on = [...boxes].filter((b) => b.checked).length;
+    const c = g.querySelector(".g-count");
+    if (c) c.textContent = on + "/" + boxes.length + " 开启";
+  });
+}
+
+function updateExpandLabel() {
+  const groups = [...document.querySelectorAll(".task-group")];
+  const allOpen = groups.length > 0 && groups.every((g) => g.open);
+  $("toggleExpand").textContent = allOpen ? "收起全部" : "展开全部";
+}
+
+function collectConfig() {
+  const mode = document.querySelector('input[name="mode"]:checked');
+  const tasks = {};
+  for (const [t, v] of Object.entries(draftTasks)) if (v) tasks[t] = true;
+  return {
+    version: 2,
+    Enable: $("enable").checked,
+    Mode: mode ? mode.value : "auto",
+    Multiplier: Number($("multiplier").value) || 555,
+    Tasks: tasks,
+  };
+}
+
+function updateModeUI() {
+  const mode = document.querySelector('input[name="mode"]:checked');
+  const auto = !mode || mode.value === "auto";
+  $("autoSection").classList.toggle("disabled", !auto);
+  $("applyNow").disabled = !mode || mode.value === "auto";
+}
+
+async function refresh() {
+  try {
+    const s = await api("/api/state");
+    state = s;
+    renderStatus(s);
+    $("conn").textContent = "已连接";
+    $("conn").className = "pill on";
+    if (!formLoaded) {
+      fillForm(s.config);
+      formLoaded = true;
+    }
+  } catch (e) {
+    $("conn").textContent = "连接失败";
+    $("conn").className = "pill off";
+  }
+}
+
+async function doAction(action) {
+  if (busy) return;
+  busy = true;
+  const buttons = [$("btnApply"), $("btnRestore"), $("btnRefresh"), $("btnSave")];
+  buttons.forEach((b) => b.disabled = true);
+  const btn = action === "apply" ? $("btnApply") : $("btnRestore");
+  const old = btn.textContent;
+  btn.innerHTML = '<span class="spin"></span>' + (action === "apply" ? "修改中…" : "还原中…");
+  try {
+    const r = await api("/api/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    toast(r.message || "完成", "ok");
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    btn.textContent = old;
+    busy = false;
+    buttons.forEach((b) => b.disabled = false);
+    refresh();
+  }
+}
+
+async function save() {
+  if (busy) return;
+  busy = true;
+  $("btnSave").disabled = true;
+  let pending = null;
+  try {
+    const cfg = collectConfig();
+    const r = await api("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(cfg),
+    });
+    toast("设置已保存", "ok");
+    draftTasks = Object.assign({}, r.config.Tasks || {});
+    renderTaskList();
+    if ($("applyNow").checked && (cfg.Mode === "always_on" || cfg.Mode === "always_off")) {
+      pending = cfg.Mode === "always_on" ? "apply" : "restore";
+    }
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    busy = false;
+    $("btnSave").disabled = false;
+    refresh();
+  }
+  if (pending) doAction(pending);
+}
+
+// events
+document.querySelectorAll('input[name="mode"]').forEach((r) => r.addEventListener("change", updateModeUI));
+$("btnApply").addEventListener("click", () => doAction("apply"));
+$("btnRestore").addEventListener("click", () => doAction("restore"));
+$("btnRefresh").addEventListener("click", refresh);
+$("btnSave").addEventListener("click", save);
+
+$("taskList").addEventListener("change", (e) => {
+  const cb = e.target.closest("input[data-task]");
+  if (!cb) return;
+  draftTasks[cb.dataset.task] = cb.checked;
+  updateCounts();
+});
+
+$("taskFilter").addEventListener("input", () => {
+  const q = $("taskFilter").value.trim().toLowerCase();
+  document.querySelectorAll(".task-group").forEach((g) => {
+    let visible = 0;
+    g.querySelectorAll(".task-row").forEach((row) => {
+      const hit = !q || row.dataset.search.includes(q);
+      row.style.display = hit ? "" : "none";
+      if (hit) visible++;
+    });
+    if (q) g.open = visible > 0;
+    g.style.display = visible ? "" : "none";
+  });
+  updateExpandLabel();
+});
+
+$("toggleExpand").addEventListener("click", () => {
+  const groups = [...document.querySelectorAll(".task-group")];
+  const allOpen = groups.length > 0 && groups.every((g) => g.open);
+  groups.forEach((g) => { g.open = !allOpen; });
+  updateExpandLabel();
+});
+
+refresh();
+setInterval(() => { if (!busy) refresh(); }, 2500);
+</script>
+</body>
+</html>
