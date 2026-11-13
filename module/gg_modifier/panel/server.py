@@ -197,6 +197,9 @@ def latest_log(log_dir):
     return max(files, key=os.path.getmtime)
 
 
+_SCHED_CACHE = {"path": None, "time": 0.0, "value": None}
+
+
 def scheduler_running(log_dir):
     """True if some process holds the latest scheduler log file open."""
     try:
@@ -207,16 +210,24 @@ def scheduler_running(log_dir):
     if not path:
         return None
     target = os.path.abspath(path)
+    now = time.time()
+    if _SCHED_CACHE["path"] == target and now - _SCHED_CACHE["time"] < 5:
+        return _SCHED_CACHE["value"]
+    found = False
     for proc in psutil.process_iter(["pid", "name"]):
         if (proc.info.get("name") or "").lower() not in ("python.exe", "python", "python3"):
             continue
         try:
             for f in proc.open_files():
                 if os.path.abspath(f.path) == target:
-                    return True
+                    found = True
+                    break
         except Exception:
             continue
-    return False
+        if found:
+            break
+    _SCHED_CACHE.update(path=target, time=now, value=found)
+    return found
 
 
 def alas_state(log_dir, port):
@@ -263,31 +274,34 @@ def memory_state(pid, multiplier):
     out = {"mode": "unknown", "value": None, "count": 0, "values": None, "cached": False}
     cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
     addrs = cache.get("addresses") or []
-    if not addrs:
-        return out
-    out["cached"] = cache.get("pid") == pid
-    if cache.get("pid") != pid:
-        return out
-    p = alas_gg.MemPatcher()
-    try:
-        bufs = p.read_many(pid, addrs, length=8, target_offset=0)
-    except Exception:
-        return out
-    vals = []
-    for a in addrs:
-        b = bufs.get(a, b"")
-        vals.append(struct.unpack("<d", b)[0] if len(b) == 8 else None)
     out["count"] = len(addrs)
-    out["values"] = vals
-    if all(v is not None and abs(v - multiplier) < 1e-9 for v in vals):
-        out["mode"] = "applied"
-        out["value"] = multiplier
-    elif all(v is not None and abs(v - 1.0) < 1e-9 for v in vals):
-        out["mode"] = "restored"
-        out["value"] = 1.0
-    elif any(v is not None for v in vals):
-        out["mode"] = "mixed"
-        out["value"] = vals[0]
+
+    # Prefer the state file written by the task hook: no adb reads while polling.
+    state = alas_gg.load_json(os.path.join(alas_gg.DATA_DIR, "state.json"), {})
+    for entry in (state.values() if isinstance(state, dict) else []):
+        if not isinstance(entry, dict) or entry.get("pid") != pid:
+            continue
+        out["cached"] = True
+        if entry.get("mode") == "applied":
+            out["mode"] = "applied"
+            out["value"] = entry.get("value", multiplier)
+        elif entry.get("mode") == "restored":
+            out["mode"] = "restored"
+            out["value"] = 1.0
+        return out
+
+    if cache.get("pid") == pid and addrs:
+        out["cached"] = True
+        try:
+            value = float(cache.get("value"))
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and abs(value - float(multiplier)) < 1e-9:
+            out["mode"] = "applied"
+            out["value"] = float(multiplier)
+        elif value is not None and abs(value - 1.0) < 1e-9:
+            out["mode"] = "restored"
+            out["value"] = 1.0
     return out
 
 
