@@ -305,6 +305,41 @@ def scheduler_running(log_dir, config_name=None):
     return found
 
 
+def running_instances(log_dir, config_names):
+    """One psutil pass: which instances' logs are held open."""
+    try:
+        import psutil
+    except Exception:
+        return None
+    held = set()
+    for proc in psutil.process_iter(["pid", "name"]):
+        if (proc.info.get("name") or "").lower() not in ("python.exe", "python", "python3"):
+            continue
+        try:
+            for f in proc.open_files():
+                held.add(os.path.abspath(f.path))
+        except Exception:
+            continue
+    out = []
+    for name in config_names:
+        path = latest_log(log_dir, name)
+        if path and os.path.abspath(path) in held:
+            out.append(name)
+    return out
+
+
+def latest_instance(log_dir, config_names):
+    best = None
+    for name in config_names:
+        path = latest_log(log_dir, name)
+        if not path:
+            continue
+        mtime = os.path.getmtime(path)
+        if best is None or mtime > best[1]:
+            best = (name, mtime)
+    return best[0] if best else (config_names[0] if config_names else None)
+
+
 def alas_state(log_dir, port, config_name=None):
     webui = port_open(port)
     sched = scheduler_running(log_dir, config_name)
@@ -410,8 +445,7 @@ def get_state(config_path, log_dir, alas_port, config_name=None):
         if bound and bound in instances:
             config_name = bound
         else:
-            running = [n for n in instances if scheduler_running(log_dir, n)]
-            config_name = running[0] if running else (instances[0] if instances else None)
+            config_name = latest_instance(log_dir, instances)
 
     serial, package = (
         instance_device(config_path, config_name)
