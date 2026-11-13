@@ -24,10 +24,11 @@ from . import alas_gg
 HERE = os.path.dirname(os.path.abspath(__file__))
 ALAS_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 CONFIG_DIR = os.environ.get(
-    "GG_MODIFIER_DATA_DIR", os.path.join(ALAS_ROOT, "config")
+    "GG_MODIFIER_DATA_DIR", os.path.join(ALAS_ROOT, "config", "gg_modifier")
 )
-CONFIG_PATH = os.path.join(CONFIG_DIR, "gg_modifier.json")
-STATE_PATH = os.path.join(CONFIG_DIR, "gg_modifier_state.json")
+ALAS_CONFIG_DIR = os.path.join(ALAS_ROOT, "config")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "settings.json")
+STATE_PATH = os.path.join(CONFIG_DIR, "state.json")
 
 DEFAULT_TASKS_ON = [
     "Main", "Main2", "Main3",
@@ -125,7 +126,7 @@ def decide(command, cfg):
 
 def _device_info(config_name):
     serial, package = "auto", "auto"
-    path = os.path.join(CONFIG_DIR, f"{config_name}.json")
+    path = os.path.join(ALAS_CONFIG_DIR, f"{config_name}.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)

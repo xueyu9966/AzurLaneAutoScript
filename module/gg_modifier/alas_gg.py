@@ -31,7 +31,9 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ALAS_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
-DATA_DIR = os.environ.get("GG_MODIFIER_DATA_DIR", os.path.join(ALAS_ROOT, "config"))
+DATA_DIR = os.environ.get(
+    "GG_MODIFIER_DATA_DIR", os.path.join(ALAS_ROOT, "config", "gg_modifier")
+)
 CACHE_PATH = os.path.join(DATA_DIR, "gg_modifier_cache.json")
 BACKUP_PATH = os.path.join(DATA_DIR, "gg_modifier_backup.json")
 
