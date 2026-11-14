@@ -257,13 +257,7 @@ def _verify(p, pid, addresses, expected):
     )
 
 
-def _apply(p, pid, value):
-    addresses = alas_gg.cache_valid(p, pid, 1.0)
-    if not addresses:
-        addresses = p.scan(pid, anchor=0.0001, target=1.0)
-    if not addresses:
-        raise RuntimeError("modifier targets not found (already modified?)")
-
+def _backup_and_patch(p, pid, addresses, value):
     old = p.read_many(pid, addresses, length=8, target_offset=0)
     backup = {"pid": pid, "values": {}}
     for a in addresses:
@@ -281,22 +275,84 @@ def _apply(p, pid, value):
     logger.info(f"GGModifier: applied {value} to {len(addresses)} addresses")
 
 
-def _restore(p, pid, value):
+def _apply(p, pid, value):
+    # Already applied? Cache says target value and the addresses verify.
     addresses = alas_gg.cache_valid(p, pid, value)
-    if not addresses:
-        addresses = p.scan(pid, anchor=0.0001, target=value)
-    if not addresses:
-        logger.info(f"GGModifier: no {value} targets found, already restored")
+    if addresses:
+        logger.info(f"GGModifier: already applied {value} at {len(addresses)} addresses")
         return
 
-    p.patch_many(pid, addresses, 1.0)
-    if not _verify(p, pid, addresses, 1.0):
-        raise RuntimeError("restore verification failed")
-    alas_gg.save_json(
-        alas_gg.CACHE_PATH,
-        {"pid": pid, "value": 1.0, "addresses": addresses, "time": time.time()},
-    )
-    logger.info(f"GGModifier: restored {len(addresses)} addresses to 1.0")
+    # Cache says 1.0: patch those addresses directly.
+    addresses = alas_gg.cache_valid(p, pid, 1.0)
+    if addresses:
+        _backup_and_patch(p, pid, addresses, value)
+        return
+
+    # Fresh scan for 1.0 targets.
+    addresses = p.scan(pid, anchor=0.0001, target=1.0)
+    if addresses:
+        _backup_and_patch(p, pid, addresses, value)
+        return
+
+    # Fresh scan for the target value: already modified, repair cache/state.
+    addresses = p.scan(pid, anchor=0.0001, target=value)
+    if addresses and _verify(p, pid, addresses, value):
+        alas_gg.save_json(
+            alas_gg.CACHE_PATH,
+            {"pid": pid, "value": value, "addresses": addresses, "time": time.time()},
+        )
+        logger.info(
+            f"GGModifier: already applied {value} at {len(addresses)} addresses (cache repaired)"
+        )
+        return
+
+    raise RuntimeError("modifier targets not found")
+
+
+def _restore(p, pid, value):
+    # Cache says target value: patch back to 1.0.
+    addresses = alas_gg.cache_valid(p, pid, value)
+    if addresses:
+        p.patch_many(pid, addresses, 1.0)
+        if not _verify(p, pid, addresses, 1.0):
+            raise RuntimeError("restore verification failed")
+        alas_gg.save_json(
+            alas_gg.CACHE_PATH,
+            {"pid": pid, "value": 1.0, "addresses": addresses, "time": time.time()},
+        )
+        logger.info(f"GGModifier: restored {len(addresses)} addresses to 1.0")
+        return
+
+    # Already restored?
+    addresses = alas_gg.cache_valid(p, pid, 1.0)
+    if addresses:
+        logger.info("GGModifier: already restored")
+        return
+
+    # Fresh scan for the modified value.
+    addresses = p.scan(pid, anchor=0.0001, target=value)
+    if addresses:
+        p.patch_many(pid, addresses, 1.0)
+        if not _verify(p, pid, addresses, 1.0):
+            raise RuntimeError("restore verification failed")
+        alas_gg.save_json(
+            alas_gg.CACHE_PATH,
+            {"pid": pid, "value": 1.0, "addresses": addresses, "time": time.time()},
+        )
+        logger.info(f"GGModifier: restored {len(addresses)} addresses to 1.0")
+        return
+
+    # Fresh scan for 1.0: already restored, repair cache.
+    addresses = p.scan(pid, anchor=0.0001, target=1.0)
+    if addresses:
+        alas_gg.save_json(
+            alas_gg.CACHE_PATH,
+            {"pid": pid, "value": 1.0, "addresses": addresses, "time": time.time()},
+        )
+        logger.info("GGModifier: already restored (cache repaired)")
+        return
+
+    raise RuntimeError(f"restore targets not found (value {value})")
 
 
 # ---------------- mid-task retire / enhance hooks ----------------
@@ -415,14 +471,28 @@ def on_task_start(config_name, command, serial=None, package=None):
 
         state = _read_state().get(config_name) or {}
         expected_state = "applied" if mode == "apply" else "restored"
+        value = float(cfg["Multiplier"])
         if (
             state.get("pid") == pid
             and state.get("mode") == expected_state
             and (not state.get("serial") or state.get("serial") == p.serial)
         ):
-            return
+            # Cross-check the cache: a stale state must not skip a real switch.
+            cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
+            try:
+                cache_value = float(cache.get("value"))
+            except (TypeError, ValueError):
+                cache_value = None
+            expected_cache = value if mode == "apply" else 1.0
+            cache_ok = (
+                cache.get("pid") == pid
+                and cache_value is not None
+                and abs(cache_value - float(expected_cache)) < 1e-9
+            )
+            if cache_ok:
+                return
+            logger.info("GGModifier: state/cache mismatch, re-checking")
 
-        value = float(cfg["Multiplier"])
         logger.info(f"GGModifier: task `{command}` -> {mode}")
         if mode == "apply":
             _apply(p, pid, value)

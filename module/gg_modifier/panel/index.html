@@ -257,7 +257,7 @@ function renderStatus(s) {
     memEl.textContent = "未修改 · 1.0";
     memEl.className = "value cool";
   } else if (m.mode === "mixed") {
-    memEl.textContent = "部分修改（需检查）";
+    memEl.textContent = "状态不一致（需检查）";
     memEl.className = "value warn";
   } else {
     memEl.textContent = "未知（尚未扫描）";

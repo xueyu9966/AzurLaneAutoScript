@@ -413,10 +413,28 @@ def memory_state(pid, multiplier, config_name=None):
         entry = best
     if entry:
         out["cached"] = True
-        if entry.get("mode") == "applied":
+        state_mode = entry.get("mode")
+        cache_value = None
+        if cache.get("pid") == pid:
+            try:
+                cache_value = float(cache.get("value"))
+            except (TypeError, ValueError):
+                cache_value = None
+        if cache_value is not None:
+            cache_mode = (
+                "applied" if abs(cache_value - float(multiplier)) < 1e-9
+                else "restored" if abs(cache_value - 1.0) < 1e-9
+                else None
+            )
+            if cache_mode and state_mode in ("applied", "restored") and cache_mode != state_mode:
+                # State file and address cache disagree; do not claim a clean state.
+                out["mode"] = "mixed"
+                out["value"] = cache_value
+                return out
+        if state_mode == "applied":
             out["mode"] = "applied"
             out["value"] = entry.get("value", multiplier)
-        elif entry.get("mode") == "restored":
+        elif state_mode == "restored":
             out["mode"] = "restored"
             out["value"] = 1.0
         return out
