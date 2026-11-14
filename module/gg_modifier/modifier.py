@@ -595,6 +595,20 @@ class _TaskWatchdog(threading.Thread):
         state = _read_state().get(self.config_name) or {}
         restore_value = _applied_value(state, cfg)
 
+        # After a "no pattern found" restore the cache is intentionally empty.
+        # Do not rescan the whole heap every 15s while the same game process is
+        # still loading; a PID change invalidates the cache and triggers a scan.
+        cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
+        if (
+            desired == "restore"
+            and state.get("mode") == "restored"
+            and cache.get("pid") == pid
+            and not cache.get("addresses")
+        ):
+            self._success("restored", pid, self.value)
+            self._fails = 0
+            return WATCHDOG_INTERVAL, stop_after
+
         # Checks and memory writes must be atomic with task end / mid-task
         # restore; otherwise the watchdog can re-apply right after the task
         # restored (or during enhancement).
