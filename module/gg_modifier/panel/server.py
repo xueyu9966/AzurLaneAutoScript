@@ -41,13 +41,17 @@ DEFAULT_TASKS_ON = [
 ]
 
 DEFAULT_CONFIG = {
-    "version": 3,
+    "version": 4,
     "Enable": True,
     "Mode": "auto",  # always_on | always_off | auto（按任务开关）
     "Multiplier": 555,
     "Tasks": {name: True for name in DEFAULT_TASKS_ON},
     "Instance": "",
     "Serial": "",
+    # Audit only: log decisions, never write memory.
+    "DryRun": False,
+    # Always restore sensitive tasks even if they are enabled in Tasks.
+    "ProtectSensitive": True,
 }
 
 TASK_GROUPS = {
@@ -128,6 +132,25 @@ RE_WAIT = re.compile(r"Wait until (.+?) for task `([^`]+)`")
 _ACTION_LOCK = threading.Lock()
 
 
+def _save_state_file(path, data):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def _plog(message):
+    """Small panel-side log (stdout is discarded when started by ALAS)."""
+    try:
+        path = os.path.join(alas_gg.DATA_DIR, "panel.log")
+        if os.path.exists(path) and os.path.getsize(path) > 1024 * 1024:
+            os.replace(path, path + ".1")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + message + "\n")
+    except OSError:
+        pass
+
+
 # ---------------- config ----------------
 def load_config(path):
     try:
@@ -145,6 +168,8 @@ def normalize_config(data):
             if k in data:
                 cfg[k] = data[k]
     cfg["Enable"] = bool(cfg.get("Enable", True))
+    cfg["DryRun"] = bool(cfg.get("DryRun", False))
+    cfg["ProtectSensitive"] = bool(cfg.get("ProtectSensitive", True))
     if cfg.get("Mode") not in ("always_on", "always_off", "auto"):
         cfg["Mode"] = "auto"
     try:
@@ -218,7 +243,11 @@ def instance_device(config_path, config_name):
     try:
         with open(os.path.join(config_dir, f"{config_name}.json"), "r", encoding="utf-8") as f:
             data = json.load(f)
-        emu = data.get("Emulator", {}) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        emu = data.get("Alas", {}).get("Emulator", {}) if isinstance(data.get("Alas"), dict) else {}
+        if not emu:
+            emu = data.get("Emulator", {}) if isinstance(data.get("Emulator"), dict) else {}
         s = emu.get("Serial")
         p = emu.get("PackageName")
         if s and s != "auto":
@@ -389,7 +418,10 @@ def alas_state(log_dir, port, config_name=None):
 
 
 def memory_state(pid, multiplier, config_name=None):
-    out = {"mode": "unknown", "value": None, "count": 0, "values": None, "cached": False}
+    out = {
+        "mode": "unknown", "value": None, "count": 0, "values": None,
+        "cached": False, "task": None, "error": None,
+    }
     cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
     addrs = cache.get("addresses") or []
     out["count"] = len(addrs)
@@ -413,7 +445,17 @@ def memory_state(pid, multiplier, config_name=None):
         entry = best
     if entry:
         out["cached"] = True
+        out["task"] = entry.get("task")
+        out["error"] = entry.get("error") or entry.get("guard_error")
         state_mode = entry.get("mode")
+        if state_mode == "pending":
+            out["mode"] = "pending"
+            out["value"] = entry.get("value", multiplier)
+            return out
+        if state_mode == "error":
+            out["mode"] = "error"
+            out["value"] = entry.get("value", multiplier)
+            return out
         cache_value = None
         if cache.get("pid") == pid:
             try:
@@ -545,16 +587,151 @@ def do_action(action, config_path, config_name=None):
                 "pid": pid,
                 "serial": serial,
                 "mode": "applied" if action == "apply" else "restored",
-                "value": value if action == "apply" else 1.0,
+                "value": value,
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "task": "manual",
+                "desired": action,
+                "manual": True,
             }
-            tmp = state_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=1)
-            os.replace(tmp, state_path)
+            _save_state_file(state_path, data)
         except Exception:
             pass
     return code == 0, text or f"exit code {code}"
+
+
+# ---------------- orphan cleanup ----------------
+def _process_alive(pid, create_time=None):
+    """True/False, or None when psutil is unavailable."""
+    try:
+        import psutil
+    except Exception:
+        return None
+    try:
+        proc = psutil.Process(int(pid))
+        if not proc.is_running():
+            return False
+        if create_time:
+            return abs(proc.create_time() - float(create_time)) < 2.0
+        return True
+    except Exception:
+        return False
+
+
+def orphan_guard_once(config_path, log_dir):
+    """Restore values left behind by a scheduler that was hard-killed.
+
+    State entries written by the task hook carry task_pid/task_ctime.  A manual
+    apply from the panel has no task_pid and is intentionally left alone.
+    """
+    try:
+        import psutil  # noqa: F401
+    except Exception:
+        return
+    state_path = os.path.join(alas_gg.DATA_DIR, "state.json")
+    state = alas_gg.load_json(state_path, {})
+    if not isinstance(state, dict):
+        return
+    cfg = load_config(config_path)
+    for name, entry in list(state.items()):
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("manual"):
+            continue
+        if entry.get("mode") not in ("applied", "pending", "error"):
+            continue
+        task_pid = entry.get("task_pid")
+        if not task_pid:
+            continue
+        alive = _process_alive(task_pid, entry.get("task_ctime"))
+        if alive is None or alive:
+            continue
+        # A new scheduler for the same instance may already own the state.
+        if scheduler_running(log_dir, name) is not False:
+            continue
+
+        serial, package = instance_device(config_path, name)
+        serial = serial or alas_gg.DEFAULT_SERIAL
+        try:
+            value = float(entry.get("value") or cfg.get("Multiplier") or 555)
+        except (TypeError, ValueError):
+            value = float(cfg.get("Multiplier") or 555)
+
+        with _ACTION_LOCK:
+            p = alas_gg.MemPatcher(serial=serial, package=package)
+            try:
+                pid = p.get_pid()
+            except Exception:
+                entry.update({
+                    "mode": "restored", "value": value, "pid": 0,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "guard": "game_not_running",
+                })
+                entry.pop("guard_error", None)
+                _save_state_file(state_path, state)
+                _plog(f"orphan cleanup {name}: game not running")
+                continue
+
+            if entry.get("pid") in (None, 0) or entry.get("pid") != pid:
+                # A new game process starts with 1.0; the old modification is gone.
+                entry.update({
+                    "mode": "restored", "value": value, "pid": pid,
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "guard": "game_restarted",
+                })
+                entry.pop("guard_error", None)
+                _save_state_file(state_path, state)
+                _plog(f"orphan cleanup {name}: game restarted")
+                continue
+
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    code = alas_gg.cmd_restore(p, value, False)
+                ok = code == 0
+                if not ok and code == 1:
+                    # cmd_restore found no modified values.  Confirm that the
+                    # targets are actually at 1.0 before claiming success.
+                    addrs = alas_gg.cache_valid(p, pid, 1.0)
+                    if not addrs:
+                        addrs = p.scan(pid, anchor=0.0001, target=1.0)
+                    if addrs:
+                        alas_gg.save_json(
+                            alas_gg.CACHE_PATH,
+                            {
+                                "pid": pid, "value": 1.0,
+                                "addresses": addrs, "time": time.time(),
+                            },
+                        )
+                        ok = True
+                if ok:
+                    entry.update({
+                        "mode": "restored", "value": value, "pid": pid,
+                        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "guard": "orphan_cleanup",
+                    })
+                    entry.pop("guard_error", None)
+                    _save_state_file(state_path, state)
+                    last = (buf.getvalue().strip().splitlines() or ["ok"])[-1]
+                    _plog(f"orphan cleanup {name}: {last}")
+                else:
+                    entry["guard_error"] = (
+                        buf.getvalue().strip() or f"restore exit code {code}"
+                    )
+                    _save_state_file(state_path, state)
+                    _plog(f"orphan cleanup {name} failed: {entry['guard_error']}")
+            except Exception as e:
+                entry["guard_error"] = f"{type(e).__name__}: {e}"
+                _save_state_file(state_path, state)
+                _plog(f"orphan cleanup {name} error: {entry['guard_error']}")
+
+
+def _guard_loop(config_path, log_dir):
+    while True:
+        try:
+            orphan_guard_once(config_path, log_dir)
+        except Exception as e:
+            _plog(f"orphan guard error: {type(e).__name__}: {e}")
+        time.sleep(20)
 
 
 # ---------------- HTTP ----------------
@@ -659,6 +836,10 @@ def main():
 
     if not os.path.exists(args.config):
         save_config(args.config, DEFAULT_CONFIG)
+
+    threading.Thread(
+        target=_guard_loop, args=(args.config, args.log_dir), daemon=True
+    ).start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"GG panel: http://{args.host}:{args.port}/", flush=True)

@@ -122,7 +122,10 @@
     <div class="title">ALAS × GameGuardian 倍率控制台
       <small id="configPath">加载中…</small>
     </div>
-    <div class="pill" id="conn">连接中…</div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div class="pill" id="dryPill" style="display:none">试运行</div>
+      <div class="pill" id="conn">连接中…</div>
+    </div>
   </header>
 
   <section class="card">
@@ -135,6 +138,7 @@
       <div class="stat"><span class="label">游戏</span><span class="value" id="stGame">—</span></div>
       <div class="stat"><span class="label">内存状态</span><span class="value" id="stMem">—</span></div>
       <div class="stat"><span class="label">ALAS 调度</span><span class="value" id="stAlas">—</span></div>
+      <div class="stat"><span class="label">保护</span><span class="value" id="stGuard">—</span></div>
       <div class="stat"><span class="label">当前任务</span><span class="value" id="stTask">—</span></div>
       <div class="stat"><span class="label">目标地址</span><span class="value dim" id="stAddr">—</span></div>
       <div class="stat"><span class="label">最后刷新</span><span class="value dim" id="stTime">—</span></div>
@@ -165,6 +169,10 @@
     <div class="row" style="margin-top:16px">
       <div class="field"><label for="multiplier">倍率</label><input type="number" id="multiplier" min="1" step="1"></div>
       <label class="switch"><input type="checkbox" id="enable"> 启用任务钩子</label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label class="switch"><input type="checkbox" id="protectSensitive"> 敏感任务强制还原（演习/大世界/每日/强化等，推荐）</label>
+      <label class="switch"><input type="checkbox" id="dryRun"> 试运行：只记录决定，不修改内存</label>
     </div>
     <div class="row" style="margin-top:14px">
       <label class="switch"><input type="checkbox" id="bindInstance"> 仅绑定到当前实例运行</label>
@@ -250,12 +258,19 @@ function renderStatus(s) {
 
   const m = s.memory || {};
   const memEl = $("stMem");
+  memEl.title = m.error || "";
   if (m.mode === "applied") {
     memEl.textContent = "已修改 · " + m.value;
     memEl.className = "value good";
   } else if (m.mode === "restored") {
     memEl.textContent = "未修改 · 1.0";
     memEl.className = "value cool";
+  } else if (m.mode === "pending") {
+    memEl.textContent = "待应用 · 等待游戏启动";
+    memEl.className = "value warn";
+  } else if (m.mode === "error") {
+    memEl.textContent = "切换失败（需检查）";
+    memEl.className = "value bad";
   } else if (m.mode === "mixed") {
     memEl.textContent = "状态不一致（需检查）";
     memEl.className = "value warn";
@@ -267,6 +282,14 @@ function renderStatus(s) {
   const a = s.alas || {};
   $("stAlas").textContent = a.running ? "运行中" : "未运行";
   $("stAlas").className = "value " + (a.running ? "good" : "dim");
+
+  const c = s.config || {};
+  const guards = [];
+  if (c.ProtectSensitive) guards.push("敏感任务强制还原");
+  if (c.DryRun) guards.push("试运行");
+  $("stGuard").textContent = guards.length ? guards.join(" · ") : "仅按任务开关";
+  $("stGuard").className = "value " + (c.DryRun ? "warn" : (c.ProtectSensitive ? "good" : "dim"));
+  $("dryPill").style.display = c.DryRun ? "" : "none";
 
   let task = "空闲";
   if (!a.running) task = "调度未运行";
@@ -292,6 +315,8 @@ function fillForm(cfg) {
   }
   $("multiplier").value = cfg.Multiplier;
   $("enable").checked = !!cfg.Enable;
+  $("protectSensitive").checked = cfg.ProtectSensitive !== false;
+  $("dryRun").checked = !!cfg.DryRun;
   $("bindInstance").checked = !!cfg.Instance;
   draftTasks = Object.assign({}, cfg.Tasks || {});
   renderTaskList();
@@ -361,11 +386,13 @@ function collectConfig() {
   for (const [t, v] of Object.entries(draftTasks)) if (v) tasks[t] = true;
   const bind = $("bindInstance").checked;
   return {
-    version: 3,
+    version: 4,
     Enable: $("enable").checked,
     Mode: mode ? mode.value : "auto",
     Multiplier: Number($("multiplier").value) || 555,
     Tasks: tasks,
+    DryRun: $("dryRun").checked,
+    ProtectSensitive: $("protectSensitive").checked,
     Instance: bind ? selectedConfig : "",
     Serial: bind
       ? ((state && state.instance_serial) || currentSettings.Serial || "")

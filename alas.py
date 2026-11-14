@@ -63,8 +63,9 @@ class AzurLaneAutoScript:
             exit(1)
 
     def run(self, command, skip_first_screenshot=False):
+        gg_modifier = None
         try:
-            from module.gg_modifier.modifier import on_task_start
+            from module.gg_modifier import modifier as gg_modifier
 
             serial = None
             package = None
@@ -75,8 +76,26 @@ class AzurLaneAutoScript:
                 package = getattr(self.device, "package", None)
             except Exception:
                 pass
-            on_task_start(self.config_name, command, serial=serial, package=package)
+            gg_modifier.on_task_start(
+                self.config_name, command, serial=serial, package=package
+            )
         except Exception as e:
+            if gg_modifier is not None and isinstance(
+                e, gg_modifier.GGModifierUnsafeError
+            ):
+                logger.critical(f"GGModifier: refusing to run `{command}`: {e}")
+                try:
+                    handle_notify(
+                        self.config.Error_OnePushConfig,
+                        title=f"Alas <{self.config_name}> GG blocked",
+                        content=(
+                            f"<{self.config_name}> cannot restore GG modifier "
+                            f"before task `{command}`: {e}"
+                        ),
+                    )
+                except Exception:
+                    pass
+                return False
             logger.warning(f"GGModifier: {e}")
         try:
             if not skip_first_screenshot:
@@ -146,6 +165,12 @@ class AzurLaneAutoScript:
                 content=f"<{self.config_name}> Exception occured",
             )
             exit(1)
+        finally:
+            try:
+                if gg_modifier is not None:
+                    gg_modifier.on_task_end(self.config_name, command)
+            except Exception as e:
+                logger.warning(f"GGModifier: task end hook failed: {e}")
 
     def save_error_log(self):
         """

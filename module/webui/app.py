@@ -1515,6 +1515,16 @@ def startup():
     ensure_gg_panel()
     lang.reload()
     updater.event = State.manager.Event()
+    try:
+        from module.webui.control_api import start_control_api
+
+        start_control_api(
+            lambda: ProcessManager._processes,
+            ProcessManager.get_manager,
+            lambda: updater.event,
+        )
+    except Exception as e:
+        logger.warning(f"GGControl: cannot start control API: {e}")
     if updater.delay > 0:
         task_handler.add(updater.check_update, updater.delay)
     task_handler.add(updater.schedule_update(), 86400)
