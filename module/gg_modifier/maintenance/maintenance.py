@@ -261,8 +261,12 @@ def fallback_schedulers():
                 path = os.path.abspath(open_file.path)
                 if os.path.dirname(path) != log_dir:
                     continue
-                match = re.match(r"^\d{4}-\d{2}-\d{2}_(.+)\.txt$", os.path.basename(path))
-                if match and not match.group(1).endswith("_gui"):
+                basename = os.path.basename(path)
+                # The GUI itself also holds log/YYYY-MM-DD_gui.txt.
+                if basename.endswith("_gui.txt"):
+                    continue
+                match = re.match(r"^\d{4}-\d{2}-\d{2}_(.+)\.txt$", basename)
+                if match and match.group(1) not in ("gui",):
                     found[match.group(1)] = proc.info["pid"]
         except Exception:
             continue
