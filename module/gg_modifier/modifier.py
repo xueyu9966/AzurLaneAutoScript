@@ -449,6 +449,9 @@ def _apply(p, pid, value):
 
 @_serialized
 def _restore(p, pid, value):
+    cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
+    had_cache = cache.get("pid") == pid and bool(cache.get("addresses"))
+
     # Cache says target value: patch back to 1.0.
     addresses = alas_gg.cache_valid(p, pid, value)
     if addresses:
@@ -481,17 +484,32 @@ def _restore(p, pid, value):
         logger.info(f"GGModifier: restored {len(addresses)} addresses to 1.0")
         return
 
-    # Fresh scan for 1.0: already restored, repair cache.
-    addresses = p.scan(pid, anchor=0.0001, target=1.0)
-    if addresses:
-        alas_gg.save_json(
-            alas_gg.CACHE_PATH,
-            {"pid": pid, "value": 1.0, "addresses": addresses, "time": time.time()},
-        )
-        logger.info("GGModifier: already restored (cache repaired)")
-        return
+    # Fresh scan for 1.0: already restored, repair cache.  Only worth doing if
+    # there was a cache entry; on a freshly started game this scan would just
+    # waste another 13 seconds.
+    if had_cache:
+        addresses = p.scan(pid, anchor=0.0001, target=1.0)
+        if addresses:
+            alas_gg.save_json(
+                alas_gg.CACHE_PATH,
+                {"pid": pid, "value": 1.0, "addresses": addresses, "time": time.time()},
+            )
+            logger.info("GGModifier: already restored (cache repaired)")
+            return
 
-    raise RuntimeError(f"restore targets not found (value {value})")
+    # Neither the modified nor the 1.0 pattern exists.  This happens while the
+    # game is still loading (splash / Restart task), where the multiplier table
+    # has not been created yet.  There is nothing we can patch, so treat it as
+    # "nothing to restore" instead of blocking the task.  Clear the stale cache
+    # so the next apply performs a fresh scan.
+    alas_gg.save_json(
+        alas_gg.CACHE_PATH,
+        {"pid": pid, "value": 1.0, "addresses": [], "time": time.time()},
+    )
+    logger.warning(
+        "GGModifier: no modifier pattern found; assuming nothing to restore"
+    )
+    return
 
 
 # ---------------- task watchdog ----------------
