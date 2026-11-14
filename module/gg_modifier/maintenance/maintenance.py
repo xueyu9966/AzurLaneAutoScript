@@ -59,6 +59,7 @@ DEFAULT_CONFIG = {
 }
 
 ROLE_TITLES = {
+    "auto": "自动判断",
     "stop-night": "夜间维护 - 停止",
     "start-night": "夜间维护 - 启动",
     "stop-month-end": "月底维护 - 停止",
@@ -160,6 +161,21 @@ def role_allowed(role, now):
     if role in ("stop", "start"):
         return True
     return False
+
+
+def detect_role(now):
+    """Pick the maintenance role for the current time, or None."""
+    if now.hour == 23 and now.minute >= 45:
+        return "stop-night"
+    if now.hour == 0 and now.minute <= 5:
+        return "stop-night"
+    if now.hour == 0 and now.minute <= 45:
+        return "start-night"
+    if now.hour == 5 and 40 <= now.minute <= 59:
+        return "stop-month-end"
+    if now.hour == 6 and now.minute <= 45:
+        return "start-month-end"
+    return None
 
 
 def lock():
@@ -551,6 +567,7 @@ def main():
     parser.add_argument(
         "role",
         choices=[
+            "auto",
             "stop-night", "start-night", "stop-month-end", "start-month-end",
             "stop", "start", "status",
         ],
@@ -566,6 +583,16 @@ def main():
     else:
         now = dt.datetime.now()
     role = args.role
+    if role == "auto":
+        detected = detect_role(now)
+        if detected is None:
+            log(
+                f"--- 自动判断 | now={now:%Y-%m-%d %H:%M} | "
+                "no maintenance window, exit ---"
+            )
+            return 0
+        log(f"auto -> {detected}")
+        role = detected
     log(f"--- {ROLE_TITLES.get(role, role)} | now={now:%Y-%m-%d %H:%M} ---")
 
     if role == "status":
