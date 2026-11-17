@@ -505,6 +505,26 @@ def start_instances(cfg, names, dry_run=False):
 
 
 def do_stop(cfg, role, dry_run=False):
+    state = load_state()
+    # A duplicate scheduled stop (the automation can be delivered twice) must
+    # not overwrite the pending restore list saved by the first run.
+    if state and str(state.get("role", "")).startswith("stop"):
+        try:
+            stopped = dt.datetime.strptime(
+                state.get("stopped_at", ""), "%Y-%m-%d %H:%M:%S"
+            )
+            age = (dt.datetime.now() - stopped).total_seconds()
+        except (TypeError, ValueError):
+            age = None
+        if age is not None and 0 <= age < 2 * 3600:
+            alive = running_instances()
+            if not alive:
+                log(
+                    "already stopped recently, keeping pending state: "
+                    f"{json.dumps(state, ensure_ascii=False)}"
+                )
+                return True
+
     names = running_instances()
     for name in sorted(fallback_schedulers()):
         if name not in names:
