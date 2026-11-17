@@ -31,6 +31,12 @@ RE_OCR = re.compile(
 )
 RE_LOG_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}_(.+)\.txt$")
 
+# Current CN top bar layout (1280x720).  ALAS's built-in OCR_OIL/OCR_COIN
+# coordinates are for an older layout; these are used only as a fallback when
+# the standard OCR returns 0.
+CUSTOM_OIL_AREA = (548, 23, 622, 51)
+CUSTOM_COIN_AREA = (715, 23, 798, 51)
+
 _WRITE_LOCK = threading.RLock()
 _MAX_BYTES = 20 * 1024 * 1024
 
@@ -188,6 +194,38 @@ def log_files(days=3, log_dir=None):
     return files
 
 
+def _custom_ocr(image):
+    """Fallback top-bar OCR for the current game UI layout."""
+    try:
+        from module.ocr.ocr import Digit
+
+        height, width = image.shape[:2]
+        sx = width / 1280.0
+        sy = height / 720.0
+
+        def scale(area):
+            return (
+                int(round(area[0] * sx)),
+                int(round(area[1] * sy)),
+                int(round(area[2] * sx)),
+                int(round(area[3] * sy)),
+            )
+
+        oil = Digit(
+            scale(CUSTOM_OIL_AREA), name="OCR_OIL_CUSTOM",
+            letter=(255, 255, 255), threshold=128,
+        ).ocr(image)
+        coin = Digit(
+            scale(CUSTOM_COIN_AREA), name="OCR_COIN_CUSTOM",
+            letter=(255, 255, 255), threshold=128,
+        ).ocr(image)
+        if 0 < oil < 1000000 and 0 < coin < 100000000:
+            return int(oil), int(coin)
+    except Exception:
+        pass
+    return 0, 0
+
+
 def snapshot_from_device(config, device, config_name, source="goto_main"):
     """Use ALAS's own OCR after it has returned to the main page."""
     try:
@@ -207,6 +245,8 @@ def snapshot_from_device(config, device, config_name, source="goto_main"):
                 continue
             oil = status.get_oil(skip_first_screenshot=True)
             coin = status.get_coin(skip_first_screenshot=True)
+            if oil <= 0 or coin <= 0:
+                oil, coin = _custom_ocr(device.image)
             if oil > 0 and coin > 0:
                 record = {
                     "time": now_str(),
