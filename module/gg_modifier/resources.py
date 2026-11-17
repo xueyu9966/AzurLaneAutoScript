@@ -198,21 +198,33 @@ def snapshot_from_device(config, device, config_name, source="goto_main"):
 
     try:
         status = CampaignStatus(config=config, device=device)
-        oil = status.get_oil(skip_first_screenshot=True)
-        coin = status.get_coin(skip_first_screenshot=True)
-        if oil <= 0 or coin <= 0:
-            logger.warning(f"GGResources: invalid OCR oil={oil} coin={coin}")
-            return None
-        record = {
-            "time": now_str(),
-            "config": config_name,
-            "oil": int(oil),
-            "coin": int(coin),
-            "source": source,
-        }
-        append_record(record)
-        logger.info(f"GGResources: {source} snapshot oil={oil} coin={coin}")
-        return record
+        oil = coin = 0
+        for attempt in range(3):
+            try:
+                device.screenshot()
+            except Exception:
+                time.sleep(1)
+                continue
+            oil = status.get_oil(skip_first_screenshot=True)
+            coin = status.get_coin(skip_first_screenshot=True)
+            if oil > 0 and coin > 0:
+                record = {
+                    "time": now_str(),
+                    "config": config_name,
+                    "oil": int(oil),
+                    "coin": int(coin),
+                    "source": source,
+                }
+                append_record(record)
+                logger.info(
+                    f"GGResources: {source} snapshot oil={oil} coin={coin}"
+                )
+                return record
+            time.sleep(1)
+        logger.warning(
+            f"GGResources: invalid OCR after retries oil={oil} coin={coin}"
+        )
+        return None
     except Exception as e:
         try:
             logger.warning(f"GGResources: snapshot failed: {e}")
