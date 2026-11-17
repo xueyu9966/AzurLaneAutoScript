@@ -221,6 +221,16 @@ class AzurLaneAutoScript:
             LoginHandler(self.config, device=self.device).app_start()
             UI(self.config, device=self.device).ui_goto_main()
 
+        # Idle/main-page resource snapshot for the GG dashboard.
+        try:
+            from module.gg_modifier.resources import snapshot_from_device
+
+            snapshot_from_device(
+                self.config, self.device, self.config_name, source='goto_main'
+            )
+        except Exception as e:
+            logger.warning(f'GGResources: {e}')
+
     def research(self):
         from module.research.research import RewardResearch
         RewardResearch(config=self.config, device=self.device).run()

@@ -30,6 +30,11 @@ ALAS_ROOT = os.path.abspath(os.path.join(MODULE_DIR, "..", ".."))
 sys.path.insert(0, MODULE_DIR)
 import alas_gg  # noqa: E402
 
+try:
+    import resources as gg_resources  # noqa: E402
+except Exception:
+    gg_resources = None
+
 DEFAULT_CONFIG_PATH = os.path.join(ALAS_ROOT, "config", "gg_modifier", "settings.json")
 DEFAULT_LOG_DIR = os.path.join(ALAS_ROOT, "log")
 DEFAULT_ALAS_PORT = 22267
@@ -149,6 +154,159 @@ def _plog(message):
             f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + message + "\n")
     except OSError:
         pass
+
+
+# ---------------- resource snapshots ----------------
+_RES_CACHE = []
+_RES_LAST = {}
+_RES_OFFSETS = {}
+_RES_LOCK = threading.RLock()
+_RES_MIN_INTERVAL = 60  # seconds; compress repeated identical OCR readings
+_RES_CACHE_LIMIT = 20000
+
+
+def _res_append(record):
+    global _RES_CACHE
+    with _RES_LOCK:
+        last = _RES_LAST.get(record.get("config"))
+        if last:
+            if str(record.get("time", "")) <= str(last.get("time", "")):
+                return False
+            try:
+                if (
+                    int(record.get("oil")) == int(last.get("oil"))
+                    and int(record.get("coin")) == int(last.get("coin"))
+                ):
+                    prev = gg_resources.parse_time(last["time"])
+                    cur = gg_resources.parse_time(record["time"])
+                    if (cur - prev).total_seconds() < _RES_MIN_INTERVAL:
+                        return False
+            except (KeyError, TypeError, ValueError):
+                pass
+        _RES_CACHE.append(record)
+        if len(_RES_CACHE) > _RES_CACHE_LIMIT:
+            del _RES_CACHE[: len(_RES_CACHE) - _RES_CACHE_LIMIT]
+        _RES_LAST[record.get("config")] = record
+    gg_resources.append_record(record)
+    return True
+
+
+def _res_add(records):
+    count = 0
+    for record in sorted(records, key=lambda item: item.get("time", "")):
+        if _res_append(record):
+            count += 1
+    return count
+
+
+def _res_seed():
+    global _RES_CACHE, _RES_LAST
+    rows = gg_resources.load_recent(limit=50000)
+    last = {}
+    for record in rows:
+        last[record.get("config")] = record
+    with _RES_LOCK:
+        _RES_CACHE = rows[-_RES_CACHE_LIMIT:]
+        _RES_LAST = last
+
+
+def _res_reload():
+    global _RES_CACHE, _RES_LAST
+    rows = gg_resources.load_recent(limit=_RES_CACHE_LIMIT)
+    last = {}
+    for record in rows:
+        last[record.get("config")] = record
+    with _RES_LOCK:
+        _RES_CACHE = rows
+        _RES_LAST = last
+
+
+def _res_backfill(log_dir, days=3):
+    if gg_resources is None:
+        return
+    _res_seed()
+    files = gg_resources.log_files(days=days, log_dir=log_dir)
+    records = []
+    for path in files:
+        config = gg_resources.config_from_path(path)
+        if config:
+            records.extend(gg_resources.parse_log_file(path, config))
+    added = _res_add(records)
+    with _RES_LOCK:
+        for path in files:
+            try:
+                _RES_OFFSETS[path] = os.path.getsize(path)
+            except OSError:
+                pass
+    _plog(f"resources: backfill {added} samples from {len(files)} logs")
+
+
+def _res_tail(log_dir):
+    if gg_resources is None:
+        return
+    for path in gg_resources.log_files(days=2, log_dir=log_dir):
+        config = gg_resources.config_from_path(path)
+        if not config:
+            continue
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        with _RES_LOCK:
+            offset = _RES_OFFSETS.get(path, 0)
+        if size < offset:
+            offset = 0
+        if size <= offset:
+            continue
+        try:
+            with open(path, "rb") as f:
+                f.seek(offset)
+                data = f.read()
+        except OSError:
+            continue
+        with _RES_LOCK:
+            _RES_OFFSETS[path] = offset + len(data)
+        records = gg_resources.parse_log_text(
+            data.decode("utf-8", errors="replace"), config
+        )
+        if records:
+            _res_add(records)
+
+
+def _resource_loop(log_dir):
+    if gg_resources is None:
+        return
+    try:
+        _res_backfill(log_dir, days=3)
+    except Exception as e:
+        _plog(f"resources: backfill failed: {type(e).__name__}: {e}")
+    last_reload = time.time()
+    while True:
+        try:
+            _res_tail(log_dir)
+        except Exception as e:
+            _plog(f"resources: tail failed: {type(e).__name__}: {e}")
+        if time.time() - last_reload >= 30:
+            try:
+                _res_reload()
+            except Exception as e:
+                _plog(f"resources: reload failed: {type(e).__name__}: {e}")
+            last_reload = time.time()
+        time.sleep(5)
+
+
+def resource_state(config_name=None):
+    if not config_name:
+        return {"latest": None, "samples": [], "count": 0}
+    with _RES_LOCK:
+        rows = [r for r in _RES_CACHE if r.get("config") == config_name]
+    if not rows:
+        return {"latest": None, "samples": [], "count": 0}
+    return {
+        "latest": rows[-1],
+        "samples": rows[-200:],
+        "count": len(rows),
+    }
 
 
 # ---------------- config ----------------
@@ -535,6 +693,7 @@ def get_state(config_path, log_dir, alas_port, config_name=None):
         },
         "memory": mem,
         "alas": alas_state(log_dir, alas_port, config_name),
+        "resources": resource_state(config_name),
         "task_groups": TASK_GROUPS,
         "task_names": TASK_DISPLAY,
     }
@@ -839,6 +998,9 @@ def main():
 
     threading.Thread(
         target=_guard_loop, args=(args.config, args.log_dir), daemon=True
+    ).start()
+    threading.Thread(
+        target=_resource_loop, args=(args.log_dir,), daemon=True
     ).start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
