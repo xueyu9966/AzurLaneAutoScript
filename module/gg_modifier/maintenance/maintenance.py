@@ -1,34 +1,16 @@
 #!/usr/bin/env python3
-"""Scheduled maintenance for ALAS + MuMu.
+"""Stop or restore the configured ALAS/MuMu VM for one identified maintenance cycle.
 
-Roles:
-    stop-night        23:50 daily, except the last day of the month:
-                      stop all running ALAS schedulers, close the emulator
-    start-night       00:10 daily, except the first day of the month:
-                      open the emulator, wait for boot, start ALAS schedulers
-    stop-month-end    05:50 on the last day of the month: same stop
-    start-month-end   06:10 on the last day of the month: same start
-    status            print current state (no changes)
-
-The monthly exception keeps ALAS online through the month-end reset at 00:00;
-maintenance is moved to 05:50/06:10 on the last day instead.
-
-Run normally from Windows Task Scheduler (see register_tasks.ps1):
-
-    pythonw.exe maintenance.py stop-night
-
-Manual testing:
-    python maintenance.py stop --force
-    python maintenance.py start --force
-    python maintenance.py stop-night --now "2026-11-30 23:50" --dry-run
-    python maintenance.py status
+ZCode invokes "auto". Its original scheduled timestamp identifies the event.
+Other schedulers can pass --scheduled-at or invoke an explicit scheduled role.
+Manual stop/start and status remain available.
 """
 import argparse
 import datetime as dt
 import json
 import os
-import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -43,6 +25,10 @@ STATE_PATH = os.path.join(DATA_DIR, "maintenance_state.json")
 LOG_PATH = os.path.join(DATA_DIR, "maintenance.log")
 LOCK_PATH = os.path.join(DATA_DIR, "maintenance.lock")
 
+sys.path.insert(0, ALAS_ROOT)
+from module.gg_modifier.runtime_lock import file_lock
+from module.gg_modifier.maintenance.zcode_trigger import planned_time
+
 DEFAULT_CONFIG = {
     "EmulatorVmIndex": 0,
     "MuMuManager": "D:/Game_D/MuMuPlayer/nx_main/MuMuManager.exe",
@@ -54,6 +40,7 @@ DEFAULT_CONFIG = {
     "WebUIPort": 22267,
     "WebUIExe": os.path.join(ALAS_ROOT, "Alas.exe"),
     "Instances": ["alas小开"],
+    "Scheduler": "zcode",
     "BootTimeout": 180,
     "ShutdownTimeout": 90,
 }
@@ -90,17 +77,11 @@ def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            cfg.update(data)
-    except (OSError, ValueError):
+        if not isinstance(data, dict):
+            raise ValueError("invalid maintenance configuration")
+        cfg.update(data)
+    except FileNotFoundError:
         pass
-    if not os.path.exists(CONFIG_PATH):
-        try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
     if not os.path.exists(cfg.get("Adb", "")):
         fallback = "D:/Game_D/MuMuPlayer/nx_main/adb.exe"
         cfg["Adb"] = fallback if os.path.exists(fallback) else "adb"
@@ -109,121 +90,97 @@ def load_config():
 
 def load_state():
     try:
-        with open(STATE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        with open(STATE_PATH, encoding="utf-8") as stream:
+            state = json.load(stream)
+    except FileNotFoundError:
         return {}
+    if not isinstance(state, dict) or not state:
+        raise ValueError("invalid maintenance journal")
+    if "cycle" not in state:
+        # A legacy pending restore from before the upgrade still belongs to its original date.
+        when = dt.datetime.strptime(state["stopped_at"], "%Y-%m-%d %H:%M:%S")
+        role = state["role"]
+        planned = when
+        if role == "stop-night" and when.hour == 0:
+            planned = when - dt.timedelta(days=1)
+        state.update(cycle=cycle_key(role, planned), phase="stopped",
+                     vm_requested=bool(state.get("emulator_was_running")))
+    if state.get("phase") not in ("stopping", "stopped", "restoring", "complete"):
+        raise ValueError("unknown maintenance journal phase")
+    if not isinstance(state.get("instances"), list) or not isinstance(state.get("vm_requested"), bool):
+        raise ValueError("invalid pending restore data")
+    return state
 
 
-def save_state(data):
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        tmp = STATE_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, STATE_PATH)
-    except OSError as e:
-        log(f"cannot write state: {e}")
+def save_state(state):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    temp = STATE_PATH + ".tmp"
+    with open(temp, "w", encoding="utf-8") as stream:
+        json.dump(state, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, STATE_PATH)
 
 
-def clear_state():
-    try:
-        os.remove(STATE_PATH)
-    except OSError:
-        pass
+SCHEDULE = {"stop-night": (23, 50), "start-night": (0, 10),
+            "stop-month-end": (5, 50), "start-month-end": (6, 10)}
 
 
 def last_day(date):
     return (date + dt.timedelta(days=1)).day == 1
 
 
-def role_allowed(role, now):
-    """Date/time gate for the four scheduled roles."""
-    if role == "stop-night":
-        if now.hour == 23 and now.minute >= 45:
-            return not last_day(now.date())
-        if now.hour == 0 and now.minute <= 5:
-            return not last_day(now.date() - dt.timedelta(days=1))
-        return False
-    if role == "start-night":
-        if now.hour == 0 and now.minute <= 40:
-            return now.date().day != 1
-        return False
-    if role == "stop-month-end":
-        if now.hour == 5 and 40 <= now.minute <= 59:
-            return last_day(now.date())
-        return False
-    if role == "start-month-end":
-        if now.hour == 6 and now.minute <= 40:
-            return last_day(now.date())
-        return False
-    if role in ("stop", "start"):
-        return True
-    return False
-
-
-def detect_role(now):
-    """Pick the maintenance role for the current time, or None."""
-    if now.hour == 23 and now.minute >= 45:
-        return "stop-night"
-    if now.hour == 0 and now.minute <= 5:
-        return "stop-night"
-    if now.hour == 0 and now.minute <= 45:
-        return "start-night"
-    if now.hour == 5 and 40 <= now.minute <= 59:
-        return "stop-month-end"
-    if now.hour == 6 and now.minute <= 45:
-        return "start-month-end"
+def scheduled_role(planned):
+    for role, clock in SCHEDULE.items():
+        if (planned.hour, planned.minute) != clock:
+            continue
+        if role.endswith("month-end"):
+            return role if last_day(planned.date()) else None
+        if role == "stop-night":
+            return role if not last_day(planned.date()) else None
+        return role if planned.day != 1 else None
     return None
 
 
-def lock():
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        fd = os.open(LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(os.getpid()).encode())
-        return fd
-    except FileExistsError:
-        try:
-            age = time.time() - os.path.getmtime(LOCK_PATH)
-        except OSError:
-            age = 0
-        if age > 30 * 60:
-            log("removing stale maintenance lock")
-            try:
-                os.remove(LOCK_PATH)
-            except OSError:
-                pass
-            return lock()
-        log("another maintenance run is in progress, exit")
-        return None
-    except OSError as e:
-        log(f"cannot create lock: {e}")
-        return None
+def nominal_time(role, now):
+    hour, minute = SCHEDULE[role]
+    day = now.date()
+    if role == "stop-night" and now.hour == 0:
+        day -= dt.timedelta(days=1)
+    return dt.datetime.combine(day, dt.time(hour, minute))
 
 
-def unlock(fd):
-    try:
-        os.close(fd)
-    except OSError:
-        pass
-    try:
-        os.remove(LOCK_PATH)
-    except OSError:
-        pass
+def cycle_key(role, planned):
+    if role in ("stop", "start"):
+        return "manual/" + planned.isoformat()
+    day = planned.date()
+    if role == "start-night":
+        day -= dt.timedelta(days=1)
+    return role.split("-", 1)[1] + "/" + day.isoformat()
 
 
-def run(cmd, timeout=60, check=False):
-    try:
-        return subprocess.run(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            timeout=timeout, check=check,
-        ).stdout.decode("utf-8", errors="replace").strip()
-    except subprocess.TimeoutExpired:
-        return f"timeout after {timeout}s: {cmd}"
-    except Exception as e:
-        return f"{type(e).__name__}: {e}"
+def due(role, planned, now):
+    if scheduled_role(planned) != role or now < planned:
+        return False
+    if role == "stop-night":
+        return now < planned + dt.timedelta(minutes=15)
+    if role == "stop-month-end":
+        return now < planned + dt.timedelta(minutes=10)
+    # A late restore can finish the same cycle until the next maintenance period.
+    # Do not take an earlier month's/night's pending state into a new cycle.
+    cutoff = now.replace(hour=23, minute=45, second=0, microsecond=0)
+    if role == "start-night" and last_day(planned.date()):
+        cutoff = cutoff.replace(hour=5, minute=40)
+    return now.date() == planned.date() and now < cutoff
+
+
+def run(cmd, timeout=60):
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            timeout=timeout, check=False)
+    output = result.stdout.decode("utf-8", errors="replace").strip()
+    if result.returncode != 0:
+        raise RuntimeError("{} exited {}: {}".format(os.path.basename(cmd[0]), result.returncode, output[:350]))
+    return output
 
 
 def port_open(port, timeout=0.5):
@@ -251,181 +208,121 @@ def api_ready(port=None):
         return False
 
 
-def api_instances(port=None):
-    try:
-        data = api("/status", timeout=5, port=port)
-    except Exception:
-        return None
-    instances = data.get("instances") or {}
-    return [name for name, item in instances.items() if item.get("alive")]
+def active_instances(cfg):
+    status = api("/status", timeout=5, port=cfg["ControlPort"])
+    if status.get("ok") is not True or not isinstance(status.get("instances"), dict):
+        raise ValueError("invalid control API status")
+    names = []
+    for name, entry in status["instances"].items():
+        if not isinstance(entry.get("alive"), bool):
+            raise ValueError("unknown scheduler status for {}".format(name))
+        if entry["alive"]:
+            names.append(name)
+    return names
 
 
-def fallback_schedulers():
-    """Find scheduler processes by the log file they hold open."""
-    try:
-        import psutil
-    except Exception:
-        return {}
-    log_dir = os.path.abspath(os.path.join(ALAS_ROOT, "log"))
-    found = {}
-    for proc in psutil.process_iter(["pid", "name"]):
-        name = (proc.info.get("name") or "").lower()
-        if name not in ("python.exe", "python", "python3"):
-            continue
-        try:
-            for open_file in proc.open_files():
-                path = os.path.abspath(open_file.path)
-                if os.path.dirname(path) != log_dir:
-                    continue
-                basename = os.path.basename(path)
-                # The GUI itself also holds log/YYYY-MM-DD_gui.txt.
-                if basename.endswith("_gui.txt"):
-                    continue
-                match = re.match(r"^\d{4}-\d{2}-\d{2}_(.+)\.txt$", basename)
-                if match and match.group(1) not in ("gui",):
-                    found[match.group(1)] = proc.info["pid"]
-        except Exception:
-            continue
-    return found
+def normalized_serial(serial):
+    return str(serial or "").strip().lower().replace("localhost:", "127.0.0.1:")
 
 
-def running_instances():
-    names = api_instances()
-    if names is not None:
-        return names
-    return sorted(fallback_schedulers())
+def instance_serial(name):
+    if not name or "/" in name or chr(92) in name or ":" in name or name in (".", ".."):
+        raise ValueError("invalid instance name")
+    path = os.path.join(ALAS_ROOT, "config", name + ".json")
+    with open(path, encoding="utf-8-sig") as stream:
+        data = json.load(stream)
+    emu = data.get("Alas", {}).get("Emulator") or data.get("Emulator", {})
+    serial = normalized_serial(emu.get("Serial"))
+    if not serial or serial == "auto":
+        raise ValueError("cannot confirm the VM for {}".format(name))
+    return serial
+
+
+def target_instances(cfg):
+    serial = normalized_serial(cfg["Serial"])
+    return [name for name in active_instances(cfg) if instance_serial(name) == serial]
+
+
+def manager_result(cfg, arguments, timeout):
+    raw = run([cfg["MuMuManager"]] + arguments, timeout=timeout)
+    data = json.loads(raw)
+    if not isinstance(data, dict) or data.get("errcode", data.get("error_code", 0)) != 0:
+        raise RuntimeError("MuMuManager: {}".format(raw[:350]))
+    return data
 
 
 def emulator_info(cfg):
-    out = run([cfg["MuMuManager"], "info", "-v", str(cfg["EmulatorVmIndex"])], timeout=20)
-    try:
-        data = json.loads(out)
-        return data if isinstance(data, dict) else {}
-    except ValueError:
-        return {"raw": out}
+    index = str(cfg["EmulatorVmIndex"])
+    info = manager_result(cfg, ["info", "-v", index], 20)
+    if str(info.get("index")) != index:
+        raise ValueError("MuMuManager did not identify VM {}".format(index))
+    port = info.get("adb_port")
+    if port:
+        actual = "{}:{}".format(info.get("adb_host_ip") or "127.0.0.1", port)
+        if normalized_serial(actual) != normalized_serial(cfg["Serial"]):
+            raise ValueError("VM {} reports a different ADB serial: {}".format(index, actual))
+    return info
 
 
 def emulator_running(cfg):
     info = emulator_info(cfg)
-    if info.get("is_process_started") or info.get("is_android_started"):
+    process = info.get("is_process_started")
+    android = info.get("is_android_started")
+    if process is True or android is True:
         return True
-    if info.get("player_state") in ("starting", "start_finished", "running"):
-        return True
-    # Fallback: the VM process exists.
-    try:
-        import psutil
-        for proc in psutil.process_iter(["name"]):
-            if (proc.info.get("name") or "").lower() == "mumuvmmheadless.exe":
-                return True
-    except Exception:
-        pass
-    return False
+    if process is False and android in (None, False):
+        return False
+    raise ValueError("MuMuManager did not report the run state for the target VM")
 
 
 def gpu_memory():
-    out = run([
-        "nvidia-smi", "--query-gpu=memory.used,memory.total",
-        "--format=csv,noheader,nounits",
-    ], timeout=15)
-    return out.splitlines()[0] if out else "unknown"
+    try:
+        output = run(["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                      "--format=csv,noheader,nounits"], timeout=15)
+        return output.splitlines()[0] if output else "unknown"
+    except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+        return "unknown ({})".format(error)
 
 
-def stop_instances(cfg, dry_run=False, names=None):
-    if names is None:
-        names = running_instances()
-    log(f"running ALAS instances: {names or 'none'}")
-    if dry_run:
-        return names
-    if api_ready(cfg["ControlPort"]):
-        try:
-            result = api("/stop_all", method="POST", port=cfg["ControlPort"])
-            log(f"control API stop_all: {result}")
-        except Exception as e:
-            log(f"control API stop_all failed: {e}")
-    else:
-        log("control API unavailable, using process fallback")
-    # Kill leftovers (API unavailable, or an instance not tracked by the UI).
-    leftovers = fallback_schedulers()
-    if leftovers:
-        try:
-            import psutil
-        except Exception:
-            psutil = None
-        for name, pid in leftovers.items():
-            if psutil is None:
-                continue
-            try:
-                psutil.Process(pid).kill()
-                log(f"killed leftover scheduler {name} (pid {pid})")
-            except Exception as e:
-                log(f"cannot kill scheduler {name} (pid {pid}): {e}")
-    return names
-
-
-def shutdown_emulator(cfg, dry_run=False):
+def shutdown_emulator(cfg):
     if not emulator_running(cfg):
-        log("emulator is not running, no shutdown needed")
         return True
-    if dry_run:
-        return True
-    log(f"shutdown emulator vm={cfg['EmulatorVmIndex']}")
-    out = run(
-        [cfg["MuMuManager"], "control", "-v", str(cfg["EmulatorVmIndex"]), "shutdown"],
-        timeout=60,
-    )
-    log(f"MuMuManager shutdown: {out}")
-    deadline = time.time() + int(cfg["ShutdownTimeout"])
-    while time.time() < deadline:
+    index = str(cfg["EmulatorVmIndex"])
+    log("shutdown emulator vm={}".format(index))
+    manager_result(cfg, ["control", "-v", index, "shutdown"], 60)
+    deadline = time.monotonic() + int(cfg["ShutdownTimeout"])
+    while time.monotonic() < deadline:
         if not emulator_running(cfg):
-            log("emulator stopped")
             return True
-        time.sleep(3)
-    log("emulator did not stop in time, trying taskkill")
-    run(["taskkill", "/F", "/IM", "MuMuVMMHeadless.exe"], timeout=30)
-    time.sleep(3)
-    stopped = not emulator_running(cfg)
-    log(f"emulator stopped after taskkill: {stopped}")
-    return stopped
+        time.sleep(2)
+    raise RuntimeError("VM {} did not stop within {}s".format(index, cfg["ShutdownTimeout"]))
 
 
-def launch_emulator(cfg, dry_run=False):
-    if emulator_running(cfg):
-        log("emulator already running")
-        return True
-    if dry_run:
-        return True
-    log(f"launch emulator vm={cfg['EmulatorVmIndex']}")
-    out = run(
-        [cfg["MuMuManager"], "control", "-v", str(cfg["EmulatorVmIndex"]), "launch"],
-        timeout=90,
-    )
-    log(f"MuMuManager launch: {out}")
-    return True
+def launch_emulator(cfg):
+    if not emulator_running(cfg):
+        index = str(cfg["EmulatorVmIndex"])
+        log("launch emulator vm={}".format(index))
+        manager_result(cfg, ["control", "-v", index, "launch"], 90)
 
 
 def adb_booted(cfg):
-    adb = cfg["Adb"]
-    serial = cfg["Serial"]
+    adb, serial = cfg["Adb"], cfg["Serial"]
     run([adb, "connect", serial], timeout=15)
-    out = run([adb, "-s", serial, "shell", "getprop", "sys.boot_completed"], timeout=15)
-    return "1" in out
+    return run([adb, "-s", serial, "shell", "getprop", "sys.boot_completed"], timeout=15) == "1"
 
 
-def wait_boot(cfg, dry_run=False):
-    if dry_run:
-        return True
-    deadline = time.time() + int(cfg["BootTimeout"])
-    last = ""
-    while time.time() < deadline:
-        if adb_booted(cfg):
-            log("emulator boot completed")
-            return True
-        if last != "waiting":
-            log(f"waiting for emulator boot ({cfg['Serial']})")
-            last = "waiting"
-        time.sleep(3)
-    log(f"emulator boot timeout after {cfg['BootTimeout']}s")
-    return False
+def wait_boot(cfg):
+    deadline = time.monotonic() + int(cfg["BootTimeout"])
+    reason = "boot flag not ready"
+    while time.monotonic() < deadline:
+        try:
+            if adb_booted(cfg):
+                log("emulator boot completed")
+                return True
+        except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+            reason = str(error)
+        time.sleep(2)
+    raise RuntimeError("emulator boot timeout: {}".format(reason))
 
 
 def ensure_webui(cfg, dry_run=False):
@@ -473,167 +370,187 @@ def ensure_webui(cfg, dry_run=False):
     return False
 
 
-def start_instances(cfg, names, dry_run=False):
-    log(f"instances to start: {names or 'none'}")
-    if dry_run:
-        return True
-    if not names:
-        return True
-    if not ensure_webui(cfg, dry_run):
-        return False
-    ok = True
-    for name in names:
-        try:
-            result = api(
-                "/start", params={"config": name},
-                method="POST", port=cfg["ControlPort"],
-            )
-            log(f"control API start {name}: {result}")
-        except Exception as e:
-            log(f"cannot start {name}: {e}")
-            ok = False
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        alive = api_instances(cfg["ControlPort"]) or []
-        missing = [name for name in names if name not in alive]
-        if not missing:
-            log(f"all instances alive: {names}")
-            return ok
-        time.sleep(3)
-    log(f"instances not alive after start: {names}")
-    return False
+def set_instance(cfg, name, action):
+    result = api("/" + action, params={"config": name}, method="POST", port=cfg["ControlPort"])
+    if result.get("ok") is not True or result.get("config") != name:
+        raise RuntimeError("control API {} {}: {}".format(action, name, result))
+    changed = result.get("started" if action == "start" else "stopped")
+    if not isinstance(changed, bool):
+        raise ValueError("missing acknowledgement for {} {}".format(action, name))
+    return changed
 
 
-def do_stop(cfg, role, dry_run=False):
-    state = load_state()
-    # A duplicate scheduled stop (the automation can be delivered twice) must
-    # not overwrite the pending restore list saved by the first run.
-    if state and str(state.get("role", "")).startswith("stop"):
-        try:
-            stopped = dt.datetime.strptime(
-                state.get("stopped_at", ""), "%Y-%m-%d %H:%M:%S"
-            )
-            age = (dt.datetime.now() - stopped).total_seconds()
-        except (TypeError, ValueError):
-            age = None
-        if age is not None and 0 <= age < 2 * 3600:
-            alive = running_instances()
-            if not alive:
-                log(
-                    "already stopped recently, keeping pending state: "
-                    f"{json.dumps(state, ensure_ascii=False)}"
-                )
-                return True
+def wait_instance(cfg, name, alive):
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        if (name in active_instances(cfg)) == alive:
+            return
+        time.sleep(1)
+    raise RuntimeError("{} failed to reach alive={}".format(name, alive))
 
-    names = running_instances()
-    for name in sorted(fallback_schedulers()):
-        if name not in names:
-            names.append(name)
-    state = {
-        "role": role,
-        "stopped_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "instances": names,
-        "emulator_was_running": emulator_running(cfg),
-    }
-    log(f"stop state: {json.dumps(state, ensure_ascii=False)}")
-    log(f"VRAM before stop: {gpu_memory()} MiB")
-    if not dry_run:
+
+def check_owner(state, cfg):
+    if (str(state.get("vm", cfg["EmulatorVmIndex"])) != str(cfg["EmulatorVmIndex"])
+            or normalized_serial(state.get("serial", cfg["Serial"])) != normalized_serial(cfg["Serial"])):
+        raise ValueError("maintenance target changed since stop; check the journal")
+
+
+def resolve_stop_intent(cfg, state):
+    name = state.get("stopping")
+    if name:
+        if name not in active_instances(cfg):
+            raise RuntimeError("stop acknowledgement missing for {}; review journal before recovery".format(name))
+        state.pop("stopping")
         save_state(state)
-        stop_instances(cfg, dry_run=False, names=names)
-        time.sleep(2)
-        shutdown_emulator(cfg, dry_run=False)
-        log(f"VRAM after stop: {gpu_memory()} MiB")
-    return True
 
 
-def do_start(cfg, role, dry_run=False):
+def do_stop(cfg, role, cycle, now, dry_run=False):
     state = load_state()
-    if state:
-        names = list(state.get("instances") or [])
-        want_emulator = bool(names) or bool(state.get("emulator_was_running"))
-    else:
-        names = list(cfg.get("Instances") or [])
-        want_emulator = bool(names)
-        log("no maintenance state found, using configured Instances")
-    log(f"start state: instances={names or 'none'}, emulator={want_emulator}")
-    log(f"VRAM before start: {gpu_memory()} MiB")
-    if not want_emulator and not names:
-        log("nothing to restore")
-        return True
+    if state and state["cycle"] == cycle and state["phase"] in ("stopped", "restoring", "complete"):
+        log("cycle already {}: {}".format(state["phase"], cycle))
+        return
+    if state and state["phase"] != "complete" and state["cycle"] != cycle:
+        raise ValueError("unresolved previous cycle: {}".format(state["cycle"]))
+    if not state or state["cycle"] != cycle:
+        state = dict(role=role, stopped_at=now.strftime("%Y-%m-%d %H:%M:%S"), cycle=cycle,
+                     phase="stopping", vm=cfg["EmulatorVmIndex"], serial=cfg["Serial"],
+                     targets=target_instances(cfg), instances=[], emulator_was_running=emulator_running(cfg),
+                     vm_requested=False)
+    check_owner(state, cfg)
+    log("stop plan: cycle={} instances={} VM={}".format(cycle, state["targets"], state["vm"]))
     if dry_run:
-        return True
-    launch_emulator(cfg, dry_run=False)
-    if not wait_boot(cfg, dry_run=False):
-        return False
-    if not start_instances(cfg, names, dry_run=False):
-        return False
-    clear_state()
-    log(f"VRAM after start: {gpu_memory()} MiB")
-    return True
+        return
+    save_state(state)
+    resolve_stop_intent(cfg, state)
+    for name in state["targets"]:
+        if name in state["instances"] or name not in target_instances(cfg):
+            continue
+        state["stopping"] = name
+        save_state(state)
+        changed = set_instance(cfg, name, "stop")
+        state.pop("stopping")
+        if changed:
+            state["instances"].append(name)
+        save_state(state)
+        wait_instance(cfg, name, False)
+    if target_instances(cfg):
+        raise RuntimeError("a scheduler still uses the target VM; shutdown cancelled")
+    if state["emulator_was_running"]:
+        state["vm_requested"] = True
+        save_state(state)
+        if not shutdown_emulator(cfg):
+            raise RuntimeError("target VM shutdown failed")
+    state["phase"] = "stopped"
+    save_state(state)
+    log("stop confirmed: instances={} VM={}".format(state["instances"], state["vm"]))
 
 
-def do_status(cfg):
-    log(f"control API ready: {api_ready(cfg['ControlPort'])}")
-    log(f"instances: {running_instances()}")
-    info = emulator_info(cfg)
-    log(f"emulator: running={emulator_running(cfg)}, "
-        f"state={info.get('player_state')}, pid={info.get('pid')}")
-    log(f"VRAM: {gpu_memory()} MiB")
-    log(f"state file: {json.dumps(load_state(), ensure_ascii=False)}")
+def do_start(cfg, role, cycle, dry_run=False):
+    state = load_state()
+    manual = role == "start"
+    if state and not manual and state["cycle"] != cycle:
+        log("no restore for this cycle: {}".format(cycle))
+        return
+    if state and state["phase"] == "complete" and not manual:
+        log("cycle already complete: {}".format(cycle))
+        return
+    if not state or state["phase"] == "complete":
+        if not manual:
+            log("no pending restore for {}".format(cycle))
+            return
+        state = dict(cycle=cycle, phase="restoring", vm=cfg["EmulatorVmIndex"],
+                     serial=cfg["Serial"], instances=list(cfg.get("Instances") or []),
+                     vm_requested=bool(cfg.get("Instances")))
+    check_owner(state, cfg)
+    names = list(state["instances"])
+    log("restore plan: cycle={} instances={} VM requested={}".format(state["cycle"], names, state["vm_requested"]))
+    if dry_run:
+        return
+    resolve_stop_intent(cfg, state)
+    for name in names:
+        if instance_serial(name) != normalized_serial(cfg["Serial"]):
+            raise ValueError("instance {} changed device; restore paused".format(name))
+    state["phase"] = "restoring"
+    save_state(state)
+    if state["vm_requested"]:
+        launch_emulator(cfg)
+    if names or state["vm_requested"]:
+        if not wait_boot(cfg):
+            raise RuntimeError("target VM is not booted")
+    if names and not ensure_webui(cfg):
+        raise RuntimeError("scheduler control API unavailable")
+    for name in names:
+        set_instance(cfg, name, "start")
+        wait_instance(cfg, name, True)
+        state["instances"].remove(name)
+        save_state(state)
+    state["phase"] = "complete"
+    save_state(state)
+    log("restore confirmed: {}".format(names))
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "role",
-        choices=[
-            "auto",
-            "stop-night", "start-night", "stop-month-end", "start-month-end",
-            "stop", "start", "status",
-        ],
-    )
-    parser.add_argument("--force", action="store_true", help="ignore date/time gate")
-    parser.add_argument("--dry-run", action="store_true", help="print actions only")
-    parser.add_argument("--now", help='override time, e.g. "2026-11-30 23:50"')
-    args = parser.parse_args()
-
-    cfg = load_config()
-    if args.now:
-        now = dt.datetime.strptime(args.now, "%Y-%m-%d %H:%M")
-    else:
-        now = dt.datetime.now()
-    role = args.role
-    if role == "auto":
-        detected = detect_role(now)
-        if detected is None:
-            log(
-                f"--- 自动判断 | now={now:%Y-%m-%d %H:%M} | "
-                "no maintenance window, exit ---"
-            )
-            return 0
-        log(f"auto -> {detected}")
-        role = detected
-    log(f"--- {ROLE_TITLES.get(role, role)} | now={now:%Y-%m-%d %H:%M} ---")
-
-    if role == "status":
-        do_status(cfg)
-        return 0
-
-    if not args.force and not role_allowed(role, now):
-        log(f"role {role} is not due at {now:%Y-%m-%d %H:%M} (last_day={last_day(now.date())}), exit")
-        return 0
-
-    fd = lock()
-    if fd is None:
-        return 0
+    parser.add_argument("role", choices=list(ROLE_TITLES))
+    parser.add_argument("--force", action="store_true", help="override time gate for an explicit role")
+    parser.add_argument("--dry-run", action="store_true", help="inspect without changing VM or state")
+    parser.add_argument("--now", help="diagnostic local time YYYY-MM-DD HH:MM")
+    parser.add_argument("--scheduled-at", help="original scheduled local time YYYY-MM-DD HH:MM")
+    args = parser.parse_args(argv)
     try:
-        if role in ("stop-night", "stop-month-end", "stop"):
-            return 0 if do_stop(cfg, role, args.dry_run) else 1
-        if role in ("start-night", "start-month-end", "start"):
-            return 0 if do_start(cfg, role, args.dry_run) else 1
+        cfg = load_config()
+        now = dt.datetime.fromisoformat(args.now) if args.now else dt.datetime.now()
+        role = args.role
+        if role == "status":
+            log("emulator={} instances={} VRAM={} MiB".format(emulator_running(cfg), active_instances(cfg), gpu_memory()))
+            log("journal: {}".format(load_state()))
+            return 0
+        planned = dt.datetime.fromisoformat(args.scheduled_at) if args.scheduled_at else None
+        if role == "auto":
+            if cfg.get("Scheduler") == "windows" and not args.dry_run:
+                log("Windows owns scheduled actions; journal={}".format(load_state()))
+                return 0
+            if planned is None:
+                planned = now if args.dry_run else planned_time(cfg, now)
+            role = scheduled_role(planned)
+            if role is None:
+                retry_role = {(0, 50): "start-night", (6, 50): "start-month-end"}.get(
+                    (planned.hour, planned.minute))
+                if retry_role:
+                    recovery = nominal_time(retry_role, planned)
+                    if (due(retry_role, recovery, now)
+                            and load_state().get("cycle") == cycle_key(retry_role, recovery)):
+                        log("recovery checkpoint scheduled={}".format(planned))
+                        role, planned = retry_role, recovery
+                if role is None:
+                    log("check only: scheduled={} now={}".format(planned, now))
+                    return 0
+        if role in SCHEDULE:
+            planned = planned or nominal_time(role, now)
+            if not due(role, planned, now) and not args.force:
+                log("skip {} scheduled={} now={}".format(role, planned, now))
+                return 0
+        else:
+            planned = now
+        cycle = cycle_key(role, planned)
+        log("--- {} | planned={} now={} cycle={} ---".format(role, planned, now, cycle))
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with file_lock(LOCK_PATH, timeout=5):
+            if role == "stop":
+                previous = load_state()
+                if previous.get("role") == "stop" and previous.get("phase") != "complete":
+                    cycle = previous["cycle"]
+            log("VRAM before {}: {} MiB".format(role, gpu_memory()))
+            if role.startswith("stop"):
+                do_stop(cfg, role, cycle, now, args.dry_run)
+            else:
+                do_start(cfg, role, cycle, args.dry_run)
+            if not args.dry_run:
+                log("VRAM after {}: {} MiB".format(role, gpu_memory()))
         return 0
-    finally:
-        unlock(fd)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
+        log("maintenance failed: {}: {}".format(type(error).__name__, error))
+        return 1
 
 
 if __name__ == "__main__":

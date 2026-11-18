@@ -276,7 +276,7 @@ function fmtNum(n) {
 function renderResources(res) {
   res = res || {};
   const latest = res.latest;
-  const samples = res.samples || [];
+  const count = Number(res.count) || 0;
   if (latest) {
     $("stOil").textContent = fmtNum(latest.oil);
     $("stCoin").textContent = fmtNum(latest.coin);
@@ -290,15 +290,14 @@ function renderResources(res) {
   }
   const winDays = Math.max(1, Math.round((res.window_hours || 48) / 24));
   const summary = [];
-  if (samples.length) {
-    const oil = samples.map((s) => Number(s.oil) || 0);
-    const coin = samples.map((s) => Number(s.coin) || 0);
-    summary.push("石油 " + fmtNum(Math.min(...oil)) + "–" + fmtNum(Math.max(...oil)));
-    summary.push("物资 " + fmtNum(Math.min(...coin)) + "–" + fmtNum(Math.max(...coin)));
-    summary.push("样本 " + samples.length + "（最近 " + winDays + " 天）");
+  if (count) {
+    const bounds = res.range || {};
+    if (bounds.oil) summary.push("石油 " + fmtNum(bounds.oil[0]) + "–" + fmtNum(bounds.oil[1]));
+    if (bounds.coin) summary.push("物资 " + fmtNum(bounds.coin[0]) + "–" + fmtNum(bounds.coin[1]));
+    summary.push("样本 " + count + "（最近 " + winDays + " 天）");
   }
   $("resSummary").textContent = summary.join(" · ");
-  if (!samples.length) {
+  if (!count) {
     $("resLegend").textContent = latest
       ? "最近 " + winDays + " 天暂无新样本；最后快照 " + (latest.time || "—")
       : "暂无资源样本；等 ALAS 下一次 OCR 或回主页面快照";

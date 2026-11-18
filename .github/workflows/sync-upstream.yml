@@ -29,4 +29,11 @@ jobs:
             echo "::error::Merge conflict with upstream/master. Resolve manually in the fork."
             exit 1
           fi
-          git push origin master
+
+      - name: Test the merged maintenance, safety, monitoring and resource behavior
+        run: |
+          python3 -m unittest discover -s tests/gg_runtime -p 'test_*.py' -v
+          node tests/gg_runtime/resource_view.cjs
+
+      - name: Publish the tested merge
+        run: git push origin HEAD:master

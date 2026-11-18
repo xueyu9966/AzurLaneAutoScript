@@ -17,6 +17,11 @@ import re
 import threading
 import time
 
+if __package__:
+    from .runtime_lock import file_lock
+else:
+    from runtime_lock import file_lock
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ALAS_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 DATA_DIR = os.environ.get(
@@ -46,7 +51,7 @@ def now_str():
 
 
 def parse_time(value):
-    return dt.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    return dt.datetime.fromisoformat(value)
 
 
 def config_from_path(path):
@@ -60,9 +65,10 @@ def config_from_path(path):
     return config
 
 
-def parse_log_text(text, config_name):
+def parse_log_text(text, config_name, pending=None):
     """Pair OCR_OIL/OCR_COIN lines that are at most 5 seconds apart."""
-    pending = {}
+    if pending is None:
+        pending = {}
     records = []
     for line in text.splitlines():
         match = RE_OCR.match(line)
@@ -71,6 +77,9 @@ def parse_log_text(text, config_name):
         moment = parse_time(match.group(1))
         kind = match.group(2)
         value = int(match.group(3))
+        if value <= 0:
+            pending.pop(kind, None)
+            continue
         pending[kind] = (moment, value)
         if "OIL" not in pending or "COIN" not in pending:
             continue
@@ -116,7 +125,7 @@ def append_record(record):
         coin = int(record.get("coin") or 0)
     except (TypeError, ValueError):
         return False
-    if oil <= 0 or coin <= 0:
+    if not record.get("config") or oil <= 0 or coin <= 0:
         return False
     entry = {
         "time": record.get("time") or now_str(),
@@ -128,13 +137,14 @@ def append_record(record):
     with _WRITE_LOCK:
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
-            if os.path.exists(DATA_PATH) and os.path.getsize(DATA_PATH) > _MAX_BYTES:
-                try:
-                    os.replace(DATA_PATH, DATA_PATH + ".1")
-                except OSError:
-                    pass
-            with open(DATA_PATH, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            with file_lock(DATA_PATH + ".lock", timeout=5):
+                archive = DATA_PATH + ".1"
+                if (os.path.exists(DATA_PATH) and os.path.getsize(DATA_PATH) > _MAX_BYTES
+                        and (not os.path.exists(archive) or
+                             os.path.getmtime(archive) < time.time() - 48 * 3600)):
+                    os.replace(DATA_PATH, archive)
+                with open(DATA_PATH, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             return True
         except OSError:
             return False
@@ -170,6 +180,40 @@ def load_last_by_config():
     for record in load_recent(limit=50000):
         last[record.get("config")] = record
     return last
+
+
+def load_window(cutoff):
+    """Read the whole window and the last older sample for each configuration."""
+    if not os.path.isdir(DATA_DIR):
+        return []
+    with _WRITE_LOCK, file_lock(DATA_PATH + ".lock", timeout=5):
+        return _read_window(cutoff)
+
+
+def _read_window(cutoff):
+    recent, latest_old = {}, {}
+    for path in (DATA_PATH + ".1", DATA_PATH):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        name, stamp = row["config"], row["time"]
+                        if not isinstance(name, str) or not name or not isinstance(stamp, str):
+                            continue
+                        parse_time(stamp)
+                        row["oil"], row["coin"] = int(row["oil"]), int(row["coin"])
+                        if row["oil"] <= 0 or row["coin"] <= 0:
+                            continue
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if stamp >= cutoff:
+                        recent[(name, stamp, row.get("source", ""))] = row
+                    elif name not in latest_old or stamp > latest_old[name]["time"]:
+                        latest_old[name] = row
+        except FileNotFoundError:
+            continue
+    return sorted(list(latest_old.values()) + list(recent.values()), key=lambda r: r["time"])
 
 
 def log_files(days=3, log_dir=None):
@@ -255,7 +299,9 @@ def snapshot_from_device(config, device, config_name, source="goto_main"):
                     "coin": int(coin),
                     "source": source,
                 }
-                append_record(record)
+                if not append_record(record):
+                    logger.warning("GGResources: snapshot could not be saved")
+                    return None
                 logger.info(
                     f"GGResources: {source} snapshot oil={oil} coin={coin}"
                 )

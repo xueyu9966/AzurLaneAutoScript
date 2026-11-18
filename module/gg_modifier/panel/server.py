@@ -10,6 +10,7 @@ Local-only web UI (127.0.0.1) for:
 Run:  python server.py [--port 22333]
 """
 import argparse
+import bisect
 import glob
 import io
 import json
@@ -157,161 +158,114 @@ def _plog(message):
 
 
 # ---------------- resource snapshots ----------------
-_RES_CACHE = []
-_RES_LAST = {}
+_RES_CACHE = {}
+_RES_TIMES = {}
 _RES_OFFSETS = {}
 _RES_LOCK = threading.RLock()
-_RES_MIN_INTERVAL = 60  # seconds; compress repeated identical OCR readings
-_RES_CACHE_LIMIT = 20000
-_RES_WINDOW_HOURS = 48  # dashboard curve window
+_RES_MIN_INTERVAL = 60
+_RES_WINDOW_HOURS = 48
+
+
+def _resource_cutoff():
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - _RES_WINDOW_HOURS * 3600))
+
+
+def _res_index(record, cache, by_value):
+    cache.setdefault(record["config"], []).append(record)
+    key = (record["config"], record["oil"], record["coin"])
+    stamp = gg_resources.parse_time(record["time"])
+    bisect.insort(by_value.setdefault(key, []), stamp)
 
 
 def _res_append(record):
-    global _RES_CACHE
+    if record["oil"] <= 0 or record["coin"] <= 0:
+        return False
+    stamp = gg_resources.parse_time(record["time"])
+    key = (record["config"], record["oil"], record["coin"])
     with _RES_LOCK:
-        last = _RES_LAST.get(record.get("config"))
-        if last:
-            if str(record.get("time", "")) <= str(last.get("time", "")):
+        times = _RES_TIMES.get(key, [])
+        pos = bisect.bisect_left(times, stamp)
+        for other in times[max(0, pos - 1):pos + 1]:
+            if abs((stamp - other).total_seconds()) < _RES_MIN_INTERVAL:
                 return False
-            try:
-                if (
-                    int(record.get("oil")) == int(last.get("oil"))
-                    and int(record.get("coin")) == int(last.get("coin"))
-                ):
-                    prev = gg_resources.parse_time(last["time"])
-                    cur = gg_resources.parse_time(record["time"])
-                    if (cur - prev).total_seconds() < _RES_MIN_INTERVAL:
-                        return False
-            except (KeyError, TypeError, ValueError):
-                pass
-        _RES_CACHE.append(record)
-        if len(_RES_CACHE) > _RES_CACHE_LIMIT:
-            del _RES_CACHE[: len(_RES_CACHE) - _RES_CACHE_LIMIT]
-        _RES_LAST[record.get("config")] = record
-    gg_resources.append_record(record)
-    return True
-
-
-def _res_add(records):
-    count = 0
-    for record in sorted(records, key=lambda item: item.get("time", "")):
-        if _res_append(record):
-            count += 1
-    return count
-
-
-def _res_seed():
-    global _RES_CACHE, _RES_LAST
-    rows = gg_resources.load_recent(limit=50000)
-    last = {}
-    for record in rows:
-        last[record.get("config")] = record
-    with _RES_LOCK:
-        _RES_CACHE = rows[-_RES_CACHE_LIMIT:]
-        _RES_LAST = last
+        if not gg_resources.append_record(record):
+            raise OSError("could not persist resource sample")
+        _res_index(record, _RES_CACHE, _RES_TIMES)
+        return True
 
 
 def _res_reload():
-    global _RES_CACHE, _RES_LAST
-    rows = gg_resources.load_recent(limit=_RES_CACHE_LIMIT)
-    last = {}
-    for record in rows:
-        last[record.get("config")] = record
+    global _RES_CACHE, _RES_TIMES
+    cache, by_value = {}, {}
+    for row in gg_resources.load_window(_resource_cutoff()):
+        _res_index(row, cache, by_value)
     with _RES_LOCK:
-        _RES_CACHE = rows
-        _RES_LAST = last
-
-
-def _res_backfill(log_dir, days=3):
-    if gg_resources is None:
-        return
-    _res_seed()
-    files = gg_resources.log_files(days=days, log_dir=log_dir)
-    records = []
-    for path in files:
-        config = gg_resources.config_from_path(path)
-        if config:
-            records.extend(gg_resources.parse_log_file(path, config))
-    added = _res_add(records)
-    with _RES_LOCK:
-        for path in files:
-            try:
-                _RES_OFFSETS[path] = os.path.getsize(path)
-            except OSError:
-                pass
-    _plog(f"resources: backfill {added} samples from {len(files)} logs")
+        _RES_CACHE, _RES_TIMES = cache, by_value
 
 
 def _res_tail(log_dir):
-    if gg_resources is None:
-        return
+    cutoff = _resource_cutoff()
+    added = 0
     for path in gg_resources.log_files(days=2, log_dir=log_dir):
-        config = gg_resources.config_from_path(path)
-        if not config:
-            continue
         try:
-            size = os.path.getsize(path)
-        except OSError:
+            with open(path, "rb") as stream:
+                stat = os.fstat(stream.fileno())
+                identity = (stat.st_dev, stat.st_ino)
+                previous, offset, pending = _RES_OFFSETS.get(path, (None, 0, {}))
+                if identity != previous or stat.st_size < offset:
+                    offset, pending = 0, {}
+                if stat.st_size == offset:
+                    continue
+                stream.seek(offset)
+                data = stream.read()
+        except FileNotFoundError:
             continue
-        with _RES_LOCK:
-            offset = _RES_OFFSETS.get(path, 0)
-        if size < offset:
-            offset = 0
-        if size <= offset:
+        # A writer may still be in the middle of a UTF-8 line.
+        complete = data.rfind(b"\n") + 1
+        if not complete:
             continue
-        try:
-            with open(path, "rb") as f:
-                f.seek(offset)
-                data = f.read()
-        except OSError:
-            continue
-        with _RES_LOCK:
-            _RES_OFFSETS[path] = offset + len(data)
-        records = gg_resources.parse_log_text(
-            data.decode("utf-8", errors="replace"), config
-        )
-        if records:
-            _res_add(records)
+        pending = pending.copy()
+        name = gg_resources.config_from_path(path)
+        rows = gg_resources.parse_log_text(data[:complete].decode("utf-8", errors="replace"), name, pending)
+        for row in rows:
+            if row["time"] >= cutoff and _res_append(row):
+                added += 1
+        # Advance only after all complete records have been persisted or deduplicated.
+        _RES_OFFSETS[path] = (identity, offset + complete, pending)
+    return added
 
 
 def _resource_loop(log_dir):
     if gg_resources is None:
         return
-    try:
-        _res_backfill(log_dir, days=2)
-    except Exception as e:
-        _plog(f"resources: backfill failed: {type(e).__name__}: {e}")
-    last_reload = time.time()
+    next_reload = 0
     while True:
         try:
-            _res_tail(log_dir)
-        except Exception as e:
-            _plog(f"resources: tail failed: {type(e).__name__}: {e}")
-        if time.time() - last_reload >= 30:
-            try:
+            if time.monotonic() >= next_reload:
                 _res_reload()
-            except Exception as e:
-                _plog(f"resources: reload failed: {type(e).__name__}: {e}")
-            last_reload = time.time()
+                next_reload = time.monotonic() + 30
+            _res_tail(log_dir)
+        except Exception as error:
+            _plog("resources: {}".format(error))
         time.sleep(5)
 
 
 def resource_state(config_name=None):
-    if not config_name:
-        return {"latest": None, "samples": [], "count": 0, "window_hours": _RES_WINDOW_HOURS}
     with _RES_LOCK:
-        rows = [r for r in _RES_CACHE if r.get("config") == config_name]
-    if not rows:
-        return {"latest": None, "samples": [], "count": 0, "window_hours": _RES_WINDOW_HOURS}
-    cutoff = time.strftime(
-        "%Y-%m-%d %H:%M:%S",
-        time.localtime(time.time() - _RES_WINDOW_HOURS * 3600),
-    )
-    recent = [r for r in rows if str(r.get("time", "")) >= cutoff]
+        rows = list(_RES_CACHE.get(config_name, []))
+    cutoff = _resource_cutoff()
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    recent = sorted((r for r in rows if cutoff <= r["time"] <= now), key=lambda r: r["time"])
+    bounds = {}
+    if recent:
+        for key in ("oil", "coin"):
+            values = [int(r[key]) for r in recent]
+            bounds[key] = [min(values), max(values)]
     return {
-        "latest": rows[-1],
+        "latest": max((r for r in rows if r["time"] <= now), key=lambda r: r["time"], default=None),
         "samples": recent[-200:],
         "count": len(recent),
+        "range": bounds,
         "window_hours": _RES_WINDOW_HOURS,
     }
 
@@ -321,8 +275,12 @@ def load_config(path):
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         data = {}
+    except (OSError, ValueError):
+        data = {"Enable": False, "DryRun": True}
+    if not isinstance(data, dict):
+        data = {"Enable": False, "DryRun": True}
     return normalize_config(data)
 
 
@@ -709,6 +667,11 @@ def get_state(config_path, log_dir, alas_port, config_name=None):
 # ---------------- actions ----------------
 def do_action(action, config_path, config_name=None):
     cfg = load_config(config_path)
+    if action not in ("apply", "restore"):
+        return False, "未知的手动操作"
+    if cfg.get("DryRun"):
+        _plog("dry-run: skipped manual {}".format(action))
+        return True, "试运行已记录，本次手动操作未写入设备"
     value = float(cfg["Multiplier"])
     serial, package = (
         instance_device(config_path, config_name)
@@ -731,6 +694,9 @@ def do_action(action, config_path, config_name=None):
 
     buf = io.StringIO()
     with _ACTION_LOCK:
+        if load_config(config_path).get("DryRun"):
+            _plog("dry-run: skipped queued manual {}".format(action))
+            return True, "试运行已记录，本次手动操作未写入设备"
         p = alas_gg.MemPatcher(serial=serial, package=package)
         try:
             if action == "apply":
@@ -798,6 +764,8 @@ def orphan_guard_once(config_path, log_dir):
     if not isinstance(state, dict):
         return
     cfg = load_config(config_path)
+    if cfg.get("DryRun"):
+        return
     for name, entry in list(state.items()):
         if not isinstance(entry, dict):
             continue
@@ -823,6 +791,8 @@ def orphan_guard_once(config_path, log_dir):
             value = float(cfg.get("Multiplier") or 555)
 
         with _ACTION_LOCK:
+            if load_config(config_path).get("DryRun"):
+                return
             p = alas_gg.MemPatcher(serial=serial, package=package)
             try:
                 pid = p.get_pid()
@@ -958,7 +928,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/config":
             try:
-                cfg = save_config(self.config_path, body)
+                with _ACTION_LOCK:
+                    cfg = save_config(self.config_path, body)
                 self._json(200, {"ok": True, "config": cfg})
             except Exception as e:
                 self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})

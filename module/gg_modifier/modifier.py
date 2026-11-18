@@ -130,8 +130,12 @@ def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, ValueError):
+    except FileNotFoundError:
         data = {}
+    except (OSError, ValueError):
+        data = {"Enable": False, "DryRun": True}
+    if not isinstance(data, dict):
+        data = {"Enable": False, "DryRun": True}
     cfg = dict(DEFAULT_CONFIG)
     if isinstance(data, dict):
         for k in (
@@ -292,13 +296,19 @@ except Exception:
     psutil = None
 
 
-def _read_state():
+def _read_state(strict=False):
     with _STATE_LOCK:
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
+            if not isinstance(data, dict):
+                raise ValueError("invalid task state")
+            return data
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:
+            if strict:
+                raise GGModifierUnsafeError("cannot verify task state: {}".format(e)) from e
             return {}
 
 
@@ -448,7 +458,7 @@ def _apply(p, pid, value):
 
 
 @_serialized
-def _restore(p, pid, value):
+def _restore(p, pid, value, require_confirmation=False):
     cache = alas_gg.load_json(alas_gg.CACHE_PATH, {})
     had_cache = cache.get("pid") == pid and bool(cache.get("addresses"))
 
@@ -502,6 +512,8 @@ def _restore(p, pid, value):
     # has not been created yet.  There is nothing we can patch, so treat it as
     # "nothing to restore" instead of blocking the task.  Clear the stale cache
     # so the next apply performs a fresh scan.
+    if require_confirmation:
+        raise GGModifierUnsafeError("cannot confirm a safe state for the protected operation")
     alas_gg.save_json(
         alas_gg.CACHE_PATH,
         {"pid": pid, "value": 1.0, "addresses": [], "time": time.time()},
@@ -565,6 +577,8 @@ class _TaskWatchdog(threading.Thread):
 
     def _tick(self):
         cfg = load_config()
+        if cfg.get("DryRun"):
+            return WATCHDOG_INTERVAL, True
         self.value = float(cfg.get("Multiplier", 555))
         desired, stop_after = self._desired_now(cfg)
         self.desired = desired or self.desired
@@ -749,16 +763,15 @@ def _run_midtask(obj, original, *args, **kwargs):
     except Exception:
         pass
     if not config_name:
-        return original(obj, *args, **kwargs)
+        raise GGModifierUnsafeError("cannot identify the instance for the protected operation")
 
     _MIDTASK_ACTIVE.set()
     try:
         restored = _restore_for_midtask(config_name)
-        try:
-            return original(obj, *args, **kwargs)
-        finally:
-            if restored:
-                _apply_after_midtask(config_name)
+        result = original(obj, *args, **kwargs)
+        if restored:
+            _apply_after_midtask(config_name)
+        return result
     finally:
         _MIDTASK_ACTIVE.clear()
 
@@ -766,26 +779,27 @@ def _run_midtask(obj, original, *args, **kwargs):
 def _restore_for_midtask(config_name):
     try:
         cfg = load_config()
-        if not cfg.get("Enable", True) or cfg.get("DryRun", False):
+        state = _read_state(strict=True).get(config_name)
+        if state is None or state.get("mode") == "restored":
             return False
-        if cfg.get("Instance") and _norm(cfg["Instance"]) != _norm(config_name):
-            return False
-        state = _read_state().get(config_name) or {}
-        if state.get("mode") != "applied":
-            return False
+        if (state.get("mode") != "applied" or not cfg.get("Enable", True)
+                or cfg.get("DryRun") or
+                (cfg.get("Instance") and _norm(cfg["Instance"]) != _norm(config_name))):
+            raise GGModifierUnsafeError("protected operation requires a confirmed safe state")
         p = _patcher(config_name, cfg, serial=state.get("serial"))
         pid = p.get_pid()
         value = _applied_value(state, cfg)
         logger.info("GGModifier: mid-task restore before retire/enhance")
-        _restore(p, pid, value)
+        _restore(p, pid, value, require_confirmation=True)
         _write_state(
             config_name, pid, "restored", value, p.serial,
             task=_CURRENT_TASK, desired="restore", mid_task=True,
         )
         return True
+    except GGModifierUnsafeError:
+        raise
     except Exception as e:
-        logger.warning(f"GGModifier: mid-task restore failed: {e}")
-        return False
+        raise GGModifierUnsafeError("protected operation paused: {}".format(e)) from e
 
 
 def _apply_after_midtask(config_name):
@@ -859,7 +873,8 @@ def on_task_start(config_name, command, serial=None, package=None):
             logger.info(f"GGModifier: bound to `{cfg['Instance']}`, skip `{config_name}`")
             return result
         if not cfg.get("Enable", True):
-            _safe_restore_if_applied(config_name, cfg)
+            if not result["dry_run"]:
+                _safe_restore_if_applied(config_name, cfg)
             return result
 
         # A previous task's watchdog may still be finishing a slow adb call.
