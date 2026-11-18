@@ -154,7 +154,7 @@
   <section class="card">
     <div class="row" style="justify-content:space-between;margin-bottom:14px">
       <h2 style="margin:0">资源仪表盘</h2>
-      <span class="hint">ALAS 连续 OCR + 回主界面快照</span>
+      <span class="hint">曲线保留最近 2 天 · ALAS 连续 OCR + 回主界面快照</span>
     </div>
     <div class="status-grid">
       <div class="stat"><span class="label">石油</span><span class="value cool" id="stOil">—</span></div>
@@ -287,17 +287,20 @@ function renderResources(res) {
     $("stResTime").textContent = "—";
     $("stResSource").textContent = "—";
   }
+  const winDays = Math.max(1, Math.round((res.window_hours || 48) / 24));
   if (!samples.length) {
-    $("resLegend").textContent = "暂无资源样本；等 ALAS 下一次 OCR 或回主页面快照";
+    $("resLegend").textContent = latest
+      ? "最近 " + winDays + " 天暂无新样本；最后快照 " + (latest.time || "—")
+      : "暂无资源样本；等 ALAS 下一次 OCR 或回主页面快照";
   } else if (samples.length === 1) {
-    $("resLegend").textContent = "1 个样本；继续运行后会形成曲线";
+    $("resLegend").textContent = "1 个样本（最近 " + winDays + " 天）；继续运行后会形成曲线";
   } else {
     const oil = samples.map((s) => Number(s.oil) || 0);
     const coin = samples.map((s) => Number(s.coin) || 0);
     $("resLegend").textContent =
       "石油 " + fmtNum(Math.min(...oil)) + "–" + fmtNum(Math.max(...oil)) +
       " · 物资 " + fmtNum(Math.min(...coin)) + "–" + fmtNum(Math.max(...coin)) +
-      " · " + samples.length + " 个样本";
+      " · " + samples.length + " 个样本（最近 " + winDays + " 天）";
   }
   drawResourceChart(samples);
 }

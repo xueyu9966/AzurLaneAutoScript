@@ -163,6 +163,7 @@ _RES_OFFSETS = {}
 _RES_LOCK = threading.RLock()
 _RES_MIN_INTERVAL = 60  # seconds; compress repeated identical OCR readings
 _RES_CACHE_LIMIT = 20000
+_RES_WINDOW_HOURS = 48  # dashboard curve window
 
 
 def _res_append(record):
@@ -277,7 +278,7 @@ def _resource_loop(log_dir):
     if gg_resources is None:
         return
     try:
-        _res_backfill(log_dir, days=3)
+        _res_backfill(log_dir, days=2)
     except Exception as e:
         _plog(f"resources: backfill failed: {type(e).__name__}: {e}")
     last_reload = time.time()
@@ -297,15 +298,21 @@ def _resource_loop(log_dir):
 
 def resource_state(config_name=None):
     if not config_name:
-        return {"latest": None, "samples": [], "count": 0}
+        return {"latest": None, "samples": [], "count": 0, "window_hours": _RES_WINDOW_HOURS}
     with _RES_LOCK:
         rows = [r for r in _RES_CACHE if r.get("config") == config_name]
     if not rows:
-        return {"latest": None, "samples": [], "count": 0}
+        return {"latest": None, "samples": [], "count": 0, "window_hours": _RES_WINDOW_HOURS}
+    cutoff = time.strftime(
+        "%Y-%m-%d %H:%M:%S",
+        time.localtime(time.time() - _RES_WINDOW_HOURS * 3600),
+    )
+    recent = [r for r in rows if str(r.get("time", "")) >= cutoff]
     return {
         "latest": rows[-1],
-        "samples": rows[-200:],
-        "count": len(rows),
+        "samples": recent[-200:],
+        "count": len(recent),
+        "window_hours": _RES_WINDOW_HOURS,
     }
 
 
