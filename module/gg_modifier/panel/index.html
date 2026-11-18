@@ -39,7 +39,12 @@
   .card { background: linear-gradient(180deg, var(--card), var(--card2)); border: 1px solid var(--line); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
   h2 { font-size: 15px; margin: 0 0 14px; color: #cfd6ea; font-weight: 600; letter-spacing: .2px; }
   .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 20px; }
-  .res-chart { width: 100%; height: 180px; display: block; margin-top: 14px; background: #0f1422; border: 1px solid var(--line); border-radius: 12px; }
+  .res-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+  .res-chart-box { background: #0f1422; border: 1px solid var(--line); border-radius: 12px; padding: 10px 10px 6px; }
+  .res-chart-title { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .res-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .res-chart { width: 100%; height: 150px; display: block; background: transparent; }
+  @media (max-width: 760px) { .res-charts { grid-template-columns: 1fr; } }
   .stat .label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
   .stat .value { font-size: 15px; font-weight: 600; }
   .value.good { color: var(--good); }
@@ -162,7 +167,16 @@
       <div class="stat"><span class="label">最后快照</span><span class="value dim" id="stResTime">—</span></div>
       <div class="stat"><span class="label">来源</span><span class="value dim" id="stResSource">—</span></div>
     </div>
-    <canvas id="resChart" class="res-chart" height="180"></canvas>
+    <div class="res-charts">
+      <div class="res-chart-box">
+        <div class="res-chart-title"><span class="res-dot" style="background:#4cc9f0"></span>石油</div>
+        <canvas id="oilChart" class="res-chart" height="150"></canvas>
+      </div>
+      <div class="res-chart-box">
+        <div class="res-chart-title"><span class="res-dot" style="background:#ffb454"></span>物资</div>
+        <canvas id="coinChart" class="res-chart" height="150"></canvas>
+      </div>
+    </div>
     <div class="hint" id="resLegend" style="margin-top:8px">暂无资源样本</div>
   </section>
 
@@ -300,40 +314,52 @@ function renderResources(res) {
     $("resLegend").textContent =
       "石油 " + fmtNum(Math.min(...oil)) + "–" + fmtNum(Math.max(...oil)) +
       " · 物资 " + fmtNum(Math.min(...coin)) + "–" + fmtNum(Math.max(...coin)) +
-      " · " + samples.length + " 个样本（最近 " + winDays + " 天）";
+      " · " + samples.length + " 个样本（最近 " + winDays + " 天，间隔 >2h 断开）";
   }
-  drawResourceChart(samples);
+  drawSeriesChart("oilChart", samples, "oil", "#4cc9f0");
+  drawSeriesChart("coinChart", samples, "coin", "#ffb454");
 }
 
-function drawResourceChart(samples) {
-  const canvas = $("resChart");
+function drawSeriesChart(canvasId, samples, key, color) {
+  const canvas = $(canvasId);
   if (!canvas) return;
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
-  const cssW = canvas.clientWidth || 640;
-  const cssH = 180;
+  const cssW = canvas.clientWidth || 500;
+  const cssH = 150;
   canvas.width = Math.floor(cssW * dpr);
   canvas.height = Math.floor(cssH * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
-  if (!samples || samples.length < 2) {
+
+  const parseTs = (s) => {
+    const raw = String((s && s.time) || "").replace(" ", "T");
+    const value = Date.parse(raw);
+    return Number.isFinite(value) ? value : null;
+  };
+  const points = (samples || [])
+    .map((s) => ({ t: parseTs(s), v: Number(s[key]) || 0, source: s.source }))
+    .filter((p) => p.t !== null)
+    .sort((a, b) => a.t - b.t);
+  if (points.length < 2) {
     ctx.fillStyle = "#5d6883";
     ctx.textAlign = "center";
     ctx.font = "13px 'Microsoft YaHei', sans-serif";
-    ctx.fillText(samples && samples.length ? "样本不足，继续运行后形成曲线" : "暂无资源样本", cssW / 2, cssH / 2);
+    ctx.fillText(points.length ? "样本不足，继续运行后形成曲线" : "暂无资源样本", cssW / 2, cssH / 2);
     return;
   }
-  const padL = 58, padR = 58, padT = 14, padB = 24;
-  const w = cssW - padL - padR, h = cssH - padT - padB;
-  const n = samples.length;
-  const oil = samples.map((s) => Number(s.oil) || 0);
-  const coin = samples.map((s) => Number(s.coin) || 0);
-  let minO = Math.min(...oil), maxO = Math.max(...oil);
-  let minC = Math.min(...coin), maxC = Math.max(...coin);
-  if (minO === maxO) { minO -= 1; maxO += 1; }
-  if (minC === maxC) { minC -= 1; maxC += 1; }
-  const x = (i) => padL + (i / (n - 1)) * w;
-  const y = (v, lo, hi) => padT + (1 - (v - lo) / (hi - lo)) * h;
+
+  const padL = 58, padR = 12, padT = 12, padB = 22;
+  const w = cssW - padL - padR;
+  const h = cssH - padT - padB;
+  let values = points.map((p) => p.v);
+  let minV = Math.min(...values), maxV = Math.max(...values);
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  const minT = points[0].t, maxT = points[points.length - 1].t;
+  const spanT = maxT - minT || 1;
+  const x = (t) => padL + ((t - minT) / spanT) * w;
+  const y = (v) => padT + (1 - (v - minV) / (maxV - minV)) * h;
+  const gapMs = 2 * 3600 * 1000;
 
   ctx.strokeStyle = "#242c44";
   ctx.lineWidth = 1;
@@ -345,46 +371,57 @@ function drawResourceChart(samples) {
     ctx.stroke();
   }
 
-  const drawLine = (values, lo, hi, color) => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+  // Break the line for gaps longer than 2 hours, so a long idle period does
+  // not turn into a fake vertical jump.
+  const segments = [];
+  let current = [];
+  points.forEach((p, i) => {
+    if (i > 0 && p.t - points[i - 1].t > gapMs) {
+      if (current.length) segments.push(current);
+      current = [];
+    }
+    current.push(p);
+  });
+  if (current.length) segments.push(current);
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  segments.forEach((segment) => {
+    if (segment.length < 2) {
+      const p = segment[0];
+      ctx.beginPath();
+      ctx.fillStyle = color;
+      ctx.arc(x(p.t), y(p.v), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
     ctx.beginPath();
-    values.forEach((v, i) => {
-      const px = x(i), py = y(v, lo, hi);
-      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    segment.forEach((p, i) => {
+      if (i === 0) ctx.moveTo(x(p.t), y(p.v));
+      else ctx.lineTo(x(p.t), y(p.v));
     });
     ctx.stroke();
-  };
-  drawLine(coin, minC, maxC, "#ffb454");
-  drawLine(oil, minO, maxO, "#4cc9f0");
+  });
 
-  samples.forEach((s, i) => {
-    if (s.source === "goto_main") {
+  points.forEach((p) => {
+    if (p.source === "goto_main") {
       ctx.beginPath();
-      ctx.fillStyle = "#4cc9f0";
-      ctx.arc(x(i), y(oil[i], minO, maxO), 3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.beginPath();
-      ctx.fillStyle = "#ffb454";
-      ctx.arc(x(i), y(coin[i], minC, maxC), 3, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.arc(x(p.t), y(p.v), 3, 0, Math.PI * 2);
       ctx.fill();
     }
   });
 
   ctx.font = "11px Consolas, monospace";
   ctx.textAlign = "right";
-  ctx.fillStyle = "#4cc9f0";
-  ctx.fillText(fmtNum(maxO), padL - 8, padT + 4);
-  ctx.fillText(fmtNum(minO), padL - 8, padT + h);
-  ctx.textAlign = "left";
-  ctx.fillStyle = "#ffb454";
-  ctx.fillText(fmtNum(maxC), padL + w + 8, padT + 4);
-  ctx.fillText(fmtNum(minC), padL + w + 8, padT + h);
+  ctx.fillStyle = color;
+  ctx.fillText(fmtNum(maxV), padL - 8, padT + 4);
+  ctx.fillText(fmtNum(minV), padL - 8, padT + h);
   ctx.fillStyle = "#8b94ad";
   ctx.textAlign = "left";
-  ctx.fillText(String(samples[0].time || "").slice(5, 16), padL, cssH - 6);
+  ctx.fillText(String((samples[0] || {}).time || "").slice(5, 16), padL, cssH - 6);
   ctx.textAlign = "right";
-  ctx.fillText(String(samples[n - 1].time || "").slice(5, 16), padL + w, cssH - 6);
+  ctx.fillText(String((samples[samples.length - 1] || {}).time || "").slice(5, 16), padL + w, cssH - 6);
 }
 
 function renderStatus(s) {
