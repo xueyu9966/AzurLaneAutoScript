@@ -516,12 +516,14 @@ def main(argv=None):
             if role is None:
                 retry_role = {(0, 50): "start-night", (6, 50): "start-month-end"}.get(
                     (planned.hour, planned.minute))
-                if retry_role:
+                if retry_role and now >= planned:
                     recovery = nominal_time(retry_role, planned)
-                    if (due(retry_role, recovery, now)
-                            and load_state().get("cycle") == cycle_key(retry_role, recovery)):
-                        log("recovery checkpoint scheduled={}".format(planned))
-                        role, planned = retry_role, recovery
+                    if due(retry_role, recovery, now):
+                        pending = load_state()
+                        if (pending.get("cycle") == cycle_key(retry_role, recovery)
+                                and pending.get("phase") != "complete"):
+                            log("recovery checkpoint scheduled={}".format(planned))
+                            role, planned = retry_role, recovery
                 if role is None:
                     log("check only: scheduled={} now={}".format(planned, now))
                     return 0
@@ -533,7 +535,7 @@ def main(argv=None):
         else:
             planned = now
         cycle = cycle_key(role, planned)
-        log("--- {} | planned={} now={} cycle={} ---".format(role, planned, now, cycle))
+        log("--- {} | planned={} now={} cycle={} dry_run={} ---".format(role, planned, now, cycle, args.dry_run))
         os.makedirs(DATA_DIR, exist_ok=True)
         with file_lock(LOCK_PATH, timeout=5):
             if role == "stop":

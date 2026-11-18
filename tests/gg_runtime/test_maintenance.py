@@ -166,7 +166,9 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(self.alive["active"])
 
     def test_no_device_writes_in_dry_run(self):
-        self.assertEqual(m.main(["stop", "--dry-run"]), 0)
+        with patch.object(m, "log") as report:
+            self.assertEqual(m.main(["stop", "--dry-run"]), 0)
+            self.assertTrue(any("dry_run=True" in call[0][0] for call in report.call_args_list))
         self.assertEqual(self.calls, [])
         self.assertEqual(m.load_state(), {})
 
