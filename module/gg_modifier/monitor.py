@@ -1,8 +1,8 @@
 """Continuous read-only monitor for the ALAS 'alas小开' scheduler.
 
 Watches the live log and the GG panel/control APIs, records task transitions,
-GGModifier decisions, memory state changes and VRAM, and flags if 555 is
-applied while a non-whitelisted task is running.
+GGModifier decisions and memory state changes, and flags if 555 is applied
+while a non-whitelisted task is running.
 
 Runs until stopped (Ctrl+C / task kill).  All ALAS/adb writes are untouched.
 """
@@ -73,18 +73,6 @@ def panel():
 def control():
     try:
         return api(22334, "/status", timeout=10)
-    except Exception:
-        return None
-
-
-def gpu_memory():
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.total",
-             "--format=csv,noheader,nounits"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,
-        ).stdout.decode("utf-8", errors="replace").strip()
-        return out.splitlines()[0] if out else None
     except Exception:
         return None
 
@@ -234,7 +222,7 @@ def main():
     cursor = load_cursor(args.out, CONFIG)
     save_cursor(args.out, cursor)
     log("monitor start: config={} cursor={} offset={}".format(CONFIG, cursor.get("file"), cursor.get("offset")))
-    next_state = next_heartbeat = next_vram = 0
+    next_state = next_heartbeat = 0
     while args.duration <= 0 or time.time() - started < args.duration:
         read_logs(LOG_DIR, cursor, record_event, lambda current: save_cursor(args.out, current))
         now = time.monotonic()
@@ -244,11 +232,6 @@ def main():
         if now >= next_heartbeat:
             log("HEARTBEAT task={} memory={}".format(last_task or "-", last_mem or "-"))
             next_heartbeat = now + args.heartbeat
-        if args.vram_interval > 0 and now >= next_vram:
-            vram = gpu_memory()
-            if vram:
-                log("VRAM {} MiB".format(vram))
-            next_vram = now + args.vram_interval
         time.sleep(args.poll)
     log("SUMMARY starts={} ends={} gg_events={} applies={} restores={} errors={}".format(
         starts, ends, events, applies, restores, len(errors)))
@@ -269,7 +252,6 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=int, default=0)
     parser.add_argument("--state-interval", type=int, default=30)
     parser.add_argument("--heartbeat", type=int, default=300)
-    parser.add_argument("--vram-interval", type=int, default=600)
     parser.add_argument("--poll", type=float, default=5)
     parser.add_argument("--out", default=OUT_DEFAULT)
     parser.add_argument("--config", default=CONFIG)
