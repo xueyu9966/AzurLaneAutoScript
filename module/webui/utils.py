@@ -246,8 +246,10 @@ class TaskHandler:
     def stop(self) -> None:
         self.remove_pending_task()
         self._alive = False
-        self._thread.join(timeout=2)
-        if not self._thread.is_alive():
+        current = threading.current_thread()
+        if self._thread is not None and self._thread is not current:
+            self._thread.join(timeout=2)
+        if self._thread is None or self._thread is current or not self._thread.is_alive():
             logger.info("Finish task handler")
         else:
             logger.warning("Task handler does not stop within 2 seconds")
