@@ -530,8 +530,24 @@ def main(argv=None):
         if role in SCHEDULE:
             planned = planned or nominal_time(role, now)
             if not due(role, planned, now) and not args.force:
-                log("skip {} scheduled={} now={}".format(role, planned, now))
-                return 0
+                # A delayed stop trigger may arrive at the paired start time.
+                # Continue the stopped cycle instead of skipping both events.
+                pair = {"stop-night": "start-night",
+                        "stop-month-end": "start-month-end"}.get(role)
+                if pair:
+                    recovery = nominal_time(pair, now)
+                    pending = load_state()
+                    if (due(pair, recovery, now)
+                            and pending.get("cycle") == cycle_key(pair, recovery)
+                            and pending.get("phase") == "stopped"):
+                        log("late {} trigger; continuing as {}".format(role, pair))
+                        role, planned = pair, recovery
+                    else:
+                        log("skip {} scheduled={} now={}".format(role, planned, now))
+                        return 0
+                else:
+                    log("skip {} scheduled={} now={}".format(role, planned, now))
+                    return 0
         else:
             planned = now
         cycle = cycle_key(role, planned)

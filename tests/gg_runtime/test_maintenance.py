@@ -84,6 +84,15 @@ class MaintenanceTests(unittest.TestCase):
             self.assertEqual(self.auto("2026-11-17 23:50", actual), 0)
         self.assertEqual(self.calls, [])
 
+    def test_late_stop_trigger_continues_with_start(self):
+        self.assertEqual(self.auto("2026-11-17 23:50", "2026-11-18 00:01"), 0)
+        self.assertEqual(m.load_state()["phase"], "stopped")
+        self.assertEqual(self.auto("2026-11-17 23:50", "2026-11-18 00:10"), 0)
+        self.assertTrue(self.alive["active"])
+        self.assertTrue(self.vm_on)
+        self.assertEqual(m.load_state()["phase"], "complete")
+        self.assertIn(("VM", "launch"), self.calls)
+
     def test_checkpoint_can_restore_only_an_existing_cycle(self):
         self.assertEqual(self.auto("2026-11-18 00:10"), 0)
         self.assertEqual(self.calls, [])
