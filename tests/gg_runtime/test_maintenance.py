@@ -50,7 +50,8 @@ class MaintenanceTests(unittest.TestCase):
         if args[0] == "info":
             return {"index": "0", "is_process_started": self.vm_on, "adb_port": 123}
         self.calls.append(("VM", args[-1]))
-        self.vm_on = args[-1] == "launch"
+        if args[-1] in ("launch", "shutdown"):
+            self.vm_on = args[-1] == "launch"
         return {"errcode": 0}
 
     def auto(self, planned, actual=None):
@@ -77,7 +78,8 @@ class MaintenanceTests(unittest.TestCase):
         self.assertFalse(self.alive["active"])
         self.assertFalse(self.alive["paused"])
         self.assertEqual(m.load_state()["phase"], "complete")
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 5)
+        self.assertIn(("VM", "hide_window"), self.calls)
 
     def test_early_or_expired_stop_is_skipped(self):
         for actual in ("2026-11-17 23:49", "2026-11-18 00:05", "2026-11-18 00:20"):
@@ -92,6 +94,14 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(self.vm_on)
         self.assertEqual(m.load_state()["phase"], "complete")
         self.assertIn(("VM", "launch"), self.calls)
+        self.assertIn(("VM", "hide_window"), self.calls)
+
+    def test_hide_emulator_can_be_disabled(self):
+        self.cfg["HideEmulator"] = False
+        self.assertEqual(self.stop(), 0)
+        self.assertEqual(self.auto("2026-11-18 00:10"), 0)
+        self.assertTrue(self.alive["active"])
+        self.assertNotIn(("VM", "hide_window"), self.calls)
 
     def test_checkpoint_can_restore_only_an_existing_cycle(self):
         self.assertEqual(self.auto("2026-11-18 00:10"), 0)

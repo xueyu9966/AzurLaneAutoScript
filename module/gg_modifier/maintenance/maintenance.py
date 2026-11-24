@@ -43,6 +43,7 @@ DEFAULT_CONFIG = {
     "Scheduler": "zcode",
     "BootTimeout": 180,
     "ShutdownTimeout": 90,
+    "HideEmulator": True,
 }
 
 ROLE_TITLES = {
@@ -305,6 +306,20 @@ def launch_emulator(cfg):
         manager_result(cfg, ["control", "-v", index, "launch"], 90)
 
 
+def hide_emulator_window(cfg):
+    """Hide the player window like the MuMu boss key after a start."""
+    if not cfg.get("HideEmulator", True):
+        return True
+    index = str(cfg["EmulatorVmIndex"])
+    try:
+        manager_result(cfg, ["control", "-v", index, "hide_window"], 20)
+        log("hide emulator window vm={}".format(index))
+        return True
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        log("hide emulator window failed: {}: {}".format(type(error).__name__, error))
+        return False
+
+
 def adb_booted(cfg):
     adb, serial = cfg["Adb"], cfg["Serial"]
     run([adb, "connect", serial], timeout=15)
@@ -477,6 +492,7 @@ def do_start(cfg, role, cycle, dry_run=False):
     if names or state["vm_requested"]:
         if not wait_boot(cfg):
             raise RuntimeError("target VM is not booted")
+        hide_emulator_window(cfg)
     if names and not ensure_webui(cfg):
         raise RuntimeError("scheduler control API unavailable")
     for name in names:
