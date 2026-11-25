@@ -39,6 +39,12 @@
   .card { background: linear-gradient(180deg, var(--card), var(--card2)); border: 1px solid var(--line); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
   h2 { font-size: 15px; margin: 0 0 14px; color: #cfd6ea; font-weight: 600; letter-spacing: .2px; }
   .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 20px; }
+  .quick-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .quick-item { border: 1px solid var(--line); background: #101524; border-radius: 14px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 74px; }
+  .quick-item.on { border-color: rgba(61,220,151,.3); background: linear-gradient(180deg, rgba(61,220,151,.07), #101524); }
+  .quick-info { min-width: 0; }
+  .quick-name { font-weight: 600; }
+  .quick-sub { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.45; }
   .res-summary { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 14px; color: var(--muted); font-size: 12px; }
   .res-summary b { color: var(--text); font-weight: 600; }
   .stat .label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
@@ -114,6 +120,7 @@
   @keyframes sp { to { transform: rotate(360deg); } }
   @media (max-width: 760px) {
     .status-grid { grid-template-columns: repeat(2, 1fr); }
+    .quick-list { grid-template-columns: 1fr; }
     .modes, .task-cols { grid-template-columns: 1fr; }
   }
 </style>
@@ -150,6 +157,14 @@
       <button class="btn danger" id="btnRestore">立即还原</button>
       <button class="btn ghost" id="btnRefresh">刷新状态</button>
     </div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between;margin-bottom:14px">
+      <h2 style="margin:0">任务快捷开关</h2>
+      <span class="hint">控制 ALAS 调度器是否运行这些任务 · 关闭会记住原本开启的项目</span>
+    </div>
+    <div class="quick-list" id="quickGroups"><div class="empty">加载中…</div></div>
   </section>
 
   <section class="card">
@@ -303,6 +318,62 @@ function renderResources(res) {
       : "暂无资源样本；等 ALAS 下一次 OCR 或回主页面快照";
   } else {
     $("resLegend").textContent = "数据来自 ALAS OCR 日志与回主界面快照";
+  }
+}
+
+function renderQuickGroups(sg) {
+  const box = $("quickGroups");
+  if (!box) return;
+  if (!sg || !sg.available) {
+    box.innerHTML = '<div class="empty">请选择实例</div>';
+    return;
+  }
+  const current = (state && state.alas && state.alas.task) || "";
+  box.innerHTML = sg.groups.map((g) => {
+    const total = g.tasks.length;
+    const count = g.enabled.length;
+    let sub;
+    if (count === total) {
+      sub = "全部开启（" + total + "）";
+    } else if (count > 0) {
+      sub = "已开 " + count + "/" + total + " · " + g.enabled.map(taskDisplay).join("、");
+    } else {
+      sub = (g.remembered && g.remembered.length)
+        ? "已关闭 · 恢复时打开 " + g.remembered.map(taskDisplay).join("、")
+        : "已关闭 · 恢复时全部打开";
+    }
+    if (current && g.tasks.includes(current)) {
+      sub += g.on ? " · 正在执行" : " · 当前任务仍在执行";
+    }
+    return `<div class="quick-item${g.on ? " on" : ""}">
+      <div class="quick-info"><div class="quick-name">${esc(g.label)}</div><div class="quick-sub">${esc(sub)}</div></div>
+      <label class="toggle"><input type="checkbox" data-group="${esc(g.id)}" aria-label="${esc(g.label)}" ${g.on ? "checked" : ""}><span class="track"></span></label>
+    </div>`;
+  }).join("");
+  box.querySelectorAll("input[data-group]").forEach((cb) => {
+    cb.addEventListener("change", () => setGroup(cb.dataset.group, cb.checked));
+  });
+}
+
+async function setGroup(groupId, enabled) {
+  if (busy) return;
+  busy = true;
+  const boxes = [...document.querySelectorAll("#quickGroups input[data-group]")];
+  boxes.forEach((b) => { b.disabled = true; });
+  try {
+    const r = await api("/api/task_group", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: selectedConfig, group: groupId, enabled }),
+    });
+    toast(r.message || "已更新", "ok");
+    if (r.schedule_groups) renderQuickGroups(r.schedule_groups);
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    busy = false;
+    boxes.forEach((b) => { b.disabled = false; });
+    refresh();
   }
 }
 
@@ -493,6 +564,7 @@ async function refresh() {
     if (seq !== refreshSeq) return;
     state = s;
     renderStatus(s);
+    renderQuickGroups(s.schedule_groups);
     renderResources(s.resources);
     renderInstances(s);
     $("conn").textContent = "已连接";
@@ -573,6 +645,7 @@ $("instanceSelect").addEventListener("change", () => {
   $("stTask").className = "value dim";
   $("stMem").textContent = "—";
   $("stMem").className = "value dim";
+  $("quickGroups").innerHTML = '<div class="empty">加载中…</div>';
   renderResources({});
   refresh();
 });

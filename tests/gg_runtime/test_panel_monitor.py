@@ -163,3 +163,86 @@ class MonitorTests(unittest.TestCase):
             self.assertEqual(worker.call_count, 2)
             self.assertNotIn("--supervise", worker.call_args[0][0])
             wait.assert_called_once_with(5)
+
+
+class TaskGroupTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.config_dir = self.root / "config"
+        (self.config_dir / "gg_modifier").mkdir(parents=True)
+        self.settings = self.config_dir / "gg_modifier" / "settings.json"
+        self.settings.write_text("{}", encoding="utf-8")
+        self.data_dir = self.root / "data"
+        self.data_dir.mkdir()
+        for change in [
+            patch.object(panel.alas_gg, "DATA_DIR", str(self.data_dir)),
+            patch.object(panel, "_plog"),
+        ]:
+            change.start()
+            self.addCleanup(change.stop)
+        self.sample = self.config_dir / "sample.json"
+        self.sample.write_text(json.dumps({
+            "Main": {"Scheduler": {"Enable": True}},
+            "Main2": {"Scheduler": {"Enable": False}},
+            "Main3": {"Scheduler": {"Enable": True}},
+            "Event": {"Scheduler": {"Enable": True}},
+            "Event2": {"Scheduler": {"Enable": False}},
+            "EventA": {"Scheduler": {"Enable": False}},
+            "EventB": {"Scheduler": {"Enable": False}},
+            "EventC": {"Scheduler": {"Enable": False}},
+            "EventD": {"Scheduler": {"Enable": False}},
+        }), encoding="utf-8")
+        self.config_path = str(self.settings)
+
+    def states(self):
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        return {key: data[key]["Scheduler"]["Enable"] for key in (
+            "Main", "Main2", "Main3", "Event", "Event2",
+            "EventA", "EventB", "EventC", "EventD",
+        )}
+
+    def test_partial_off_remembers_and_restores(self):
+        ok, message, groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", False
+        )
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertFalse(states["Main"] or states["Main2"] or states["Main3"])
+        self.assertTrue(states["Event"])
+        self.assertEqual(groups["groups"][0]["remembered"], ["Main", "Main3"])
+        saved = json.loads((self.data_dir / "task_groups.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["sample"]["main"], ["Main", "Main3"])
+
+        ok, message, groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", True
+        )
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertTrue(states["Main"])
+        self.assertFalse(states["Main2"])
+        self.assertTrue(states["Main3"])
+        self.assertTrue(states["Event"])
+        self.assertIsNone(groups["groups"][0]["remembered"])
+
+    def test_on_without_record_enables_all(self):
+        ok, message, groups = panel.set_schedule_group(
+            self.config_path, "sample", "event_daily", True
+        )
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertTrue(all(states[key] for key in ("EventA", "EventB", "EventC", "EventD")))
+        self.assertTrue(groups["groups"][2]["all"])
+
+    def test_rejects_unknown_group_instance_and_flag(self):
+        self.assertFalse(panel.set_schedule_group(self.config_path, "sample", "nope", True)[0])
+        self.assertFalse(panel.set_schedule_group(self.config_path, "missing", "main", True)[0])
+        self.assertFalse(panel.set_schedule_group(self.config_path, "sample", "main", "yes")[0])
+
+    def test_partial_state_is_reported(self):
+        state = panel.schedule_group_state(self.config_path, "sample")
+        self.assertTrue(state["available"])
+        self.assertEqual(state["groups"][0]["enabled"], ["Main", "Main3"])
+        self.assertTrue(state["groups"][0]["partial"])
+        self.assertFalse(state["groups"][0]["all"])
