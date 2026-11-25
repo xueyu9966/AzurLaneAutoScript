@@ -40,11 +40,17 @@
   h2 { font-size: 15px; margin: 0 0 14px; color: #cfd6ea; font-weight: 600; letter-spacing: .2px; }
   .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px 20px; }
   .quick-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-  .quick-item { border: 1px solid var(--line); background: #101524; border-radius: 14px; padding: 14px 16px; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 74px; }
+  .quick-item { border: 1px solid var(--line); background: #101524; border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; align-items: stretch; gap: 10px; min-height: 110px; }
   .quick-item.on { border-color: rgba(61,220,151,.3); background: linear-gradient(180deg, rgba(61,220,151,.07), #101524); }
+  .quick-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .quick-info { min-width: 0; }
   .quick-name { font-weight: 600; }
   .quick-sub { color: var(--muted); font-size: 12px; margin-top: 3px; line-height: 1.45; }
+  .quick-master { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .quick-tasks { display: flex; flex-wrap: wrap; gap: 6px; }
+  .quick-task { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); background: #0f1422; border-radius: 8px; padding: 4px 8px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; transition: .15s; }
+  .quick-task input { width: 14px; height: 14px; margin: 0; accent-color: var(--accent); }
+  .quick-task.on { color: var(--text); border-color: rgba(124,92,255,.45); background: rgba(124,92,255,.12); }
   .res-summary { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 14px; color: var(--muted); font-size: 12px; }
   .res-summary b { color: var(--text); font-weight: 600; }
   .stat .label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 2px; }
@@ -321,6 +327,12 @@ function renderResources(res) {
   }
 }
 
+const SHORT_TASK = {
+  main: { Main: "1", Main2: "2", Main3: "3" },
+  event: { Event: "1", Event2: "2" },
+  event_daily: { EventA: "A", EventB: "B", EventC: "C", EventD: "D" },
+};
+
 function renderQuickGroups(sg) {
   const box = $("quickGroups");
   if (!box) return;
@@ -332,33 +344,47 @@ function renderQuickGroups(sg) {
   box.innerHTML = sg.groups.map((g) => {
     const total = g.tasks.length;
     const count = g.enabled.length;
+    const enabled = new Set(g.enabled);
     let sub;
     if (count === total) {
-      sub = "全部开启（" + total + "）";
+      sub = "总开关 · 全部开启（" + total + "）";
     } else if (count > 0) {
-      sub = "已开 " + count + "/" + total + " · " + g.enabled.map(taskDisplay).join("、");
+      sub = "总开关 · 已开 " + count + "/" + total;
     } else {
       sub = (g.remembered && g.remembered.length)
-        ? "已关闭 · 恢复时打开 " + g.remembered.map(taskDisplay).join("、")
-        : "已关闭 · 恢复时全部打开";
+        ? "总开关 · 已关闭 · 恢复时打开 " + g.remembered.map(taskDisplay).join("、")
+        : "总开关 · 已关闭 · 恢复时全部打开";
     }
     if (current && g.tasks.includes(current)) {
       sub += g.on ? " · 正在执行" : " · 当前任务仍在执行";
     }
+    const chips = g.tasks.map((t) => {
+      const short = (SHORT_TASK[g.id] || {})[t] || taskDisplay(t);
+      const on = enabled.has(t);
+      return `<label class="quick-task${on ? " on" : ""}" title="${esc(taskDisplay(t))}">
+        <input type="checkbox" data-sched-task="${esc(t)}" aria-label="${esc(taskDisplay(t))}" ${on ? "checked" : ""}>
+        <span>${esc(short)}</span></label>`;
+    }).join("");
     return `<div class="quick-item${g.on ? " on" : ""}">
-      <div class="quick-info"><div class="quick-name">${esc(g.label)}</div><div class="quick-sub">${esc(sub)}</div></div>
-      <label class="toggle"><input type="checkbox" data-group="${esc(g.id)}" aria-label="${esc(g.label)}" ${g.on ? "checked" : ""}><span class="track"></span></label>
+      <div class="quick-head">
+        <div class="quick-info"><div class="quick-name">${esc(g.label)}</div><div class="quick-sub">${esc(sub)}</div></div>
+        <label class="quick-master">总 <span class="toggle"><input type="checkbox" data-group="${esc(g.id)}" aria-label="${esc(g.label)}总开关" ${g.on ? "checked" : ""}><span class="track"></span></span></label>
+      </div>
+      <div class="quick-tasks">${chips}</div>
     </div>`;
   }).join("");
   box.querySelectorAll("input[data-group]").forEach((cb) => {
     cb.addEventListener("change", () => setGroup(cb.dataset.group, cb.checked));
+  });
+  box.querySelectorAll("input[data-sched-task]").forEach((cb) => {
+    cb.addEventListener("change", () => setScheduleTask(cb.dataset.schedTask, cb.checked));
   });
 }
 
 async function setGroup(groupId, enabled) {
   if (busy) return;
   busy = true;
-  const boxes = [...document.querySelectorAll("#quickGroups input[data-group]")];
+  const boxes = [...document.querySelectorAll("#quickGroups input")];
   boxes.forEach((b) => { b.disabled = true; });
   try {
     const r = await api("/api/task_group", {
@@ -373,6 +399,28 @@ async function setGroup(groupId, enabled) {
   } finally {
     busy = false;
     boxes.forEach((b) => { b.disabled = false; });
+    refresh();
+  }
+}
+
+async function setScheduleTask(task, enabled) {
+  if (busy) return;
+  busy = true;
+  const inputs = [...document.querySelectorAll("#quickGroups input")];
+  inputs.forEach((b) => { b.disabled = true; });
+  try {
+    const r = await api("/api/schedule_task", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: selectedConfig, task, enabled }),
+    });
+    toast(r.message || "已更新", "ok");
+    if (r.schedule_groups) renderQuickGroups(r.schedule_groups);
+  } catch (e) {
+    toast(e.message, "err");
+  } finally {
+    busy = false;
+    inputs.forEach((b) => { b.disabled = false; });
     refresh();
   }
 }

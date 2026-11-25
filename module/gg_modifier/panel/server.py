@@ -493,7 +493,7 @@ def set_schedule_group(config_path, config_name, group_id, enabled):
                 _write_instance_config(path, data)
             except OSError as error:
                 return False, f"写入实例配置失败: {error}", None
-            per_instance.pop(group["id"], None)
+            per_instance[group["id"]] = target
             try:
                 _save_task_group_state(state_data)
             except OSError as error:
@@ -528,6 +528,52 @@ def set_schedule_group(config_path, config_name, group_id, enabled):
             return False, f"写入实例配置失败: {error}", None
         _plog("task group {}/{} off: {}".format(config_name, group["id"], on))
         return True, "已关闭，记住原本开启：" + "、".join(on), schedule_group_state(config_path, config_name)
+
+
+def set_schedule_task(config_path, config_name, task_name, enabled):
+    """Directly enable/disable one scheduler task, keeping the group memory."""
+    task_name = str(task_name)
+    group = next((item for item in SCHEDULE_GROUPS if task_name in item["tasks"]), None)
+    if group is None:
+        return False, "未知任务", None
+    if not config_name or config_name not in list_instances(config_path):
+        return False, "实例不存在", None
+    if not isinstance(enabled, bool):
+        return False, "enabled 必须是 true 或 false", None
+    path = _instance_config_path(config_path, config_name)
+    with _TASK_GROUP_LOCK:
+        try:
+            data = _load_instance_config(path)
+        except (OSError, ValueError) as error:
+            return False, f"读取实例配置失败: {error}", None
+        if not isinstance(data.get(task_name), dict):
+            return False, "实例中没有该任务", None
+        before = [task for task in group["tasks"] if _scheduler_enabled(data, task)]
+        entry = data[task_name]
+        scheduler = entry.setdefault("Scheduler", {})
+        if not isinstance(scheduler, dict):
+            scheduler = {}
+            entry["Scheduler"] = scheduler
+        scheduler["Enable"] = enabled
+        try:
+            _write_instance_config(path, data)
+        except OSError as error:
+            return False, f"写入实例配置失败: {error}", None
+        after = [task for task in group["tasks"] if _scheduler_enabled(data, task)]
+        state_data = _load_task_group_state()
+        per_instance = state_data.setdefault(config_name, {})
+        if not isinstance(per_instance, dict):
+            per_instance = {}
+            state_data[config_name] = per_instance
+        remembered = after or before
+        if remembered:
+            per_instance[group["id"]] = remembered
+        try:
+            _save_task_group_state(state_data)
+        except OSError as error:
+            _plog(f"task group state save failed: {error}")
+        _plog("task {}/{} -> {}".format(config_name, task_name, enabled))
+        return True, ("已开启：" if enabled else "已关闭：") + task_name, schedule_group_state(config_path, config_name)
 
 
 _SERIAL_CACHE = {}
@@ -1109,6 +1155,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"ok": True, "config": cfg})
             except Exception as e:
                 self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
+            return
+
+        if path == "/api/schedule_task":
+            enabled = body.get("enabled")
+            if not isinstance(enabled, bool):
+                self._json(400, {"ok": False, "error": "enabled must be true or false"})
+                return
+            try:
+                ok, message, groups = set_schedule_task(
+                    self.config_path, body.get("config"), body.get("task"), enabled
+                )
+            except Exception as e:
+                self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
+                return
+            payload = {"ok": ok, "message": message}
+            if groups is not None:
+                payload["schedule_groups"] = groups
+            self._json(200 if ok else 400, payload)
             return
 
         if path == "/api/task_group":

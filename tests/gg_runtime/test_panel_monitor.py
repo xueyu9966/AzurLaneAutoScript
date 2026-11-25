@@ -224,7 +224,47 @@ class TaskGroupTests(unittest.TestCase):
         self.assertFalse(states["Main2"])
         self.assertTrue(states["Main3"])
         self.assertTrue(states["Event"])
-        self.assertIsNone(groups["groups"][0]["remembered"])
+        self.assertEqual(groups["groups"][0]["remembered"], ["Main", "Main3"])
+
+    def test_individual_toggles_keep_the_last_non_empty_set(self):
+        ok, message, groups = panel.set_schedule_task(
+            self.config_path, "sample", "Main2", True
+        )
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertTrue(all(states[key] for key in ("Main", "Main2", "Main3")))
+        self.assertTrue(groups["groups"][0]["all"])
+
+        for task in ("Main", "Main2", "Main3"):
+            ok, message, groups = panel.set_schedule_task(
+                self.config_path, "sample", task, False
+            )
+            self.assertTrue(ok, message)
+        self.assertFalse(any(self.states()[key] for key in ("Main", "Main2", "Main3")))
+        self.assertEqual(groups["groups"][0]["remembered"], ["Main3"])
+
+        ok, message, groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", True
+        )
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertFalse(states["Main"] or states["Main2"])
+        self.assertTrue(states["Main3"])
+
+    def test_individual_on_from_all_off_turns_the_group_on(self):
+        ok, message, groups = panel.set_schedule_task(
+            self.config_path, "sample", "EventB", True
+        )
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertTrue(states["EventB"])
+        self.assertFalse(states["EventA"] or states["EventC"] or states["EventD"])
+        self.assertTrue(groups["groups"][2]["on"])
+        self.assertEqual(groups["groups"][2]["enabled"], ["EventB"])
+
+    def test_individual_rejects_unknown_task_and_flag(self):
+        self.assertFalse(panel.set_schedule_task(self.config_path, "sample", "Nope", True)[0])
+        self.assertFalse(panel.set_schedule_task(self.config_path, "sample", "Main", "yes")[0])
 
     def test_on_without_record_enables_all(self):
         ok, message, groups = panel.set_schedule_group(
