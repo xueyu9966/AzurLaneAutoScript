@@ -203,7 +203,7 @@ class TaskGroupTests(unittest.TestCase):
             "EventA", "EventB", "EventC", "EventD",
         )}
 
-    def test_partial_off_remembers_and_restores(self):
+    def test_gate_off_keeps_selection_and_on_restores_it(self):
         ok, message, groups = panel.set_schedule_group(
             self.config_path, "sample", "main", False
         )
@@ -211,9 +211,11 @@ class TaskGroupTests(unittest.TestCase):
         states = self.states()
         self.assertFalse(states["Main"] or states["Main2"] or states["Main3"])
         self.assertTrue(states["Event"])
-        self.assertEqual(groups["groups"][0]["remembered"], ["Main", "Main3"])
+        group = groups["groups"][0]
+        self.assertFalse(group["master"])
+        self.assertEqual(group["selected"], ["Main", "Main3"])
         saved = json.loads((self.data_dir / "task_groups.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["sample"]["main"], ["Main", "Main3"])
+        self.assertEqual(saved["sample"]["main"], {"master": False, "selected": ["Main", "Main3"]})
 
         ok, message, groups = panel.set_schedule_group(
             self.config_path, "sample", "main", True
@@ -224,56 +226,82 @@ class TaskGroupTests(unittest.TestCase):
         self.assertFalse(states["Main2"])
         self.assertTrue(states["Main3"])
         self.assertTrue(states["Event"])
-        self.assertEqual(groups["groups"][0]["remembered"], ["Main", "Main3"])
+        self.assertTrue(groups["groups"][0]["master"])
+        self.assertEqual(groups["groups"][0]["selected"], ["Main", "Main3"])
 
-    def test_individual_toggles_keep_the_last_non_empty_set(self):
+    def test_individual_requires_gate_open(self):
+        ok, message, _groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", False
+        )
+        self.assertTrue(ok, message)
+        ok, message, groups = panel.set_schedule_task(
+            self.config_path, "sample", "Main2", True
+        )
+        self.assertFalse(ok)
+        self.assertFalse(self.states()["Main2"])
+        self.assertEqual(groups["groups"][0]["selected"], ["Main", "Main3"])
+
+        ok, message, _groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", True
+        )
+        self.assertTrue(ok, message)
         ok, message, groups = panel.set_schedule_task(
             self.config_path, "sample", "Main2", True
         )
         self.assertTrue(ok, message)
         states = self.states()
         self.assertTrue(all(states[key] for key in ("Main", "Main2", "Main3")))
-        self.assertTrue(groups["groups"][0]["all"])
+        self.assertEqual(groups["groups"][0]["selected"], ["Main", "Main2", "Main3"])
 
-        for task in ("Main", "Main2", "Main3"):
+    def test_gate_open_with_empty_selection_runs_nothing(self):
+        ok, message, _groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", True
+        )
+        self.assertTrue(ok, message)
+        for task in ("Main", "Main3"):
             ok, message, groups = panel.set_schedule_task(
                 self.config_path, "sample", task, False
             )
             self.assertTrue(ok, message)
         self.assertFalse(any(self.states()[key] for key in ("Main", "Main2", "Main3")))
-        self.assertEqual(groups["groups"][0]["remembered"], ["Main3"])
+        self.assertTrue(groups["groups"][0]["master"])
+        self.assertEqual(groups["groups"][0]["selected"], [])
 
+        ok, message, _groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", False
+        )
+        self.assertTrue(ok, message)
         ok, message, groups = panel.set_schedule_group(
             self.config_path, "sample", "main", True
         )
         self.assertTrue(ok, message)
-        states = self.states()
-        self.assertFalse(states["Main"] or states["Main2"])
-        self.assertTrue(states["Main3"])
-
-    def test_individual_on_from_all_off_turns_the_group_on(self):
-        ok, message, groups = panel.set_schedule_task(
-            self.config_path, "sample", "EventB", True
-        )
-        self.assertTrue(ok, message)
-        states = self.states()
-        self.assertTrue(states["EventB"])
-        self.assertFalse(states["EventA"] or states["EventC"] or states["EventD"])
-        self.assertTrue(groups["groups"][2]["on"])
-        self.assertEqual(groups["groups"][2]["enabled"], ["EventB"])
+        self.assertFalse(any(self.states()[key] for key in ("Main", "Main2", "Main3")))
+        self.assertTrue(groups["groups"][0]["master"])
+        self.assertEqual(groups["groups"][0]["selected"], [])
 
     def test_individual_rejects_unknown_task_and_flag(self):
         self.assertFalse(panel.set_schedule_task(self.config_path, "sample", "Nope", True)[0])
         self.assertFalse(panel.set_schedule_task(self.config_path, "sample", "Main", "yes")[0])
 
-    def test_on_without_record_enables_all(self):
-        ok, message, groups = panel.set_schedule_group(
-            self.config_path, "sample", "event_daily", True
+    def test_old_list_state_migrates_to_gate_and_selection(self):
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        for task in ("Main", "Main2", "Main3"):
+            data[task]["Scheduler"]["Enable"] = False
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        (self.data_dir / "task_groups.json").write_text(
+            json.dumps({"sample": {"main": ["Main"]}}), encoding="utf-8"
+        )
+        group = panel.schedule_group_state(self.config_path, "sample")["groups"][0]
+        self.assertFalse(group["master"])
+        self.assertEqual(group["selected"], ["Main"])
+
+        ok, message, _groups = panel.set_schedule_group(
+            self.config_path, "sample", "main", True
         )
         self.assertTrue(ok, message)
         states = self.states()
-        self.assertTrue(all(states[key] for key in ("EventA", "EventB", "EventC", "EventD")))
-        self.assertTrue(groups["groups"][2]["all"])
+        self.assertTrue(states["Main"])
+        self.assertFalse(states["Main2"] or states["Main3"])
 
     def test_rejects_unknown_group_instance_and_flag(self):
         self.assertFalse(panel.set_schedule_group(self.config_path, "sample", "nope", True)[0])
@@ -281,8 +309,9 @@ class TaskGroupTests(unittest.TestCase):
         self.assertFalse(panel.set_schedule_group(self.config_path, "sample", "main", "yes")[0])
 
     def test_partial_state_is_reported(self):
-        state = panel.schedule_group_state(self.config_path, "sample")
-        self.assertTrue(state["available"])
-        self.assertEqual(state["groups"][0]["enabled"], ["Main", "Main3"])
-        self.assertTrue(state["groups"][0]["partial"])
-        self.assertFalse(state["groups"][0]["all"])
+        group = panel.schedule_group_state(self.config_path, "sample")["groups"][0]
+        self.assertTrue(group["master"])
+        self.assertEqual(group["selected"], ["Main", "Main3"])
+        self.assertEqual(group["enabled"], ["Main", "Main3"])
+        self.assertTrue(group["partial"])
+        self.assertFalse(group["all"])

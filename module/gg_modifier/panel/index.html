@@ -42,6 +42,8 @@
   .quick-list { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   .quick-item { border: 1px solid var(--line); background: #101524; border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; align-items: stretch; gap: 10px; min-height: 110px; }
   .quick-item.on { border-color: rgba(61,220,151,.3); background: linear-gradient(180deg, rgba(61,220,151,.07), #101524); }
+  .quick-item.off .quick-tasks { opacity: .55; }
+  .quick-item.off .quick-task { cursor: default; }
   .quick-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
   .quick-info { min-width: 0; }
   .quick-name { font-weight: 600; }
@@ -343,32 +345,32 @@ function renderQuickGroups(sg) {
   const current = (state && state.alas && state.alas.task) || "";
   box.innerHTML = sg.groups.map((g) => {
     const total = g.tasks.length;
-    const count = g.enabled.length;
-    const enabled = new Set(g.enabled);
+    const selected = new Set(g.selected || []);
+    const count = selected.size;
     let sub;
-    if (count === total) {
-      sub = "总开关 · 全部开启（" + total + "）";
-    } else if (count > 0) {
-      sub = "总开关 · 已开 " + count + "/" + total;
+    if (g.master) {
+      sub = count === total
+        ? "总开关已开 · 全部选中"
+        : (count > 0 ? "总开关已开 · 已选 " + count + "/" + total : "总开关已开 · 未选择任务");
     } else {
-      sub = (g.remembered && g.remembered.length)
-        ? "总开关 · 已关闭 · 恢复时打开 " + g.remembered.map(taskDisplay).join("、")
-        : "总开关 · 已关闭 · 恢复时全部打开";
+      sub = count > 0
+        ? "总开关已关 · 已记住 " + count + "/" + total + "（下方暂不生效）"
+        : "总开关已关 · 未选择任务";
     }
     if (current && g.tasks.includes(current)) {
-      sub += g.on ? " · 正在执行" : " · 当前任务仍在执行";
+      sub += (g.enabled || []).includes(current) ? " · 正在执行" : " · 当前任务仍在执行";
     }
     const chips = g.tasks.map((t) => {
       const short = (SHORT_TASK[g.id] || {})[t] || taskDisplay(t);
-      const on = enabled.has(t);
+      const on = selected.has(t);
       return `<label class="quick-task${on ? " on" : ""}" title="${esc(taskDisplay(t))}">
-        <input type="checkbox" data-sched-task="${esc(t)}" aria-label="${esc(taskDisplay(t))}" ${on ? "checked" : ""}>
+        <input type="checkbox" data-sched-task="${esc(t)}" aria-label="${esc(taskDisplay(t))}" ${on ? "checked" : ""}${g.master ? "" : " disabled"}>
         <span>${esc(short)}</span></label>`;
     }).join("");
-    return `<div class="quick-item${g.on ? " on" : ""}">
+    return `<div class="quick-item${g.master ? " on" : " off"}">
       <div class="quick-head">
         <div class="quick-info"><div class="quick-name">${esc(g.label)}</div><div class="quick-sub">${esc(sub)}</div></div>
-        <label class="quick-master">总 <span class="toggle"><input type="checkbox" data-group="${esc(g.id)}" aria-label="${esc(g.label)}总开关" ${g.on ? "checked" : ""}><span class="track"></span></span></label>
+        <label class="quick-master">总 <span class="toggle"><input type="checkbox" data-group="${esc(g.id)}" aria-label="${esc(g.label)}总开关" ${g.master ? "checked" : ""}><span class="track"></span></span></label>
       </div>
       <div class="quick-tasks">${chips}</div>
     </div>`;
