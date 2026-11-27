@@ -511,7 +511,7 @@ def latest_log(log_dir, config_name=None):
 _SCHED_CACHE = {"path": None, "time": 0.0, "value": None}
 
 
-def scheduler_running(log_dir, config_name=None):
+def scheduler_running(log_dir, config_name=None, fresh=False):
     """True if some process holds that instance's scheduler log file open."""
     try:
         import psutil
@@ -522,7 +522,7 @@ def scheduler_running(log_dir, config_name=None):
         return None
     target = os.path.abspath(path)
     now = time.time()
-    if _SCHED_CACHE["path"] == target and now - _SCHED_CACHE["time"] < 20:
+    if not fresh and _SCHED_CACHE["path"] == target and now - _SCHED_CACHE["time"] < 20:
         return _SCHED_CACHE["value"]
     found = False
     for proc in psutil.process_iter(["pid", "name"]):
@@ -1058,8 +1058,13 @@ def _disable_auto_farm_tasks(data, tasks):
 def auto_farm_check(config_path, config_name, log_dir):
     """Scheduled-task entry point: start Main/Main2 when oil is near 24k."""
     instance = _auto_farm_instance(config_path, config_name, log_dir)
-    if not instance or scheduler_running(log_dir, instance) is not True:
+    if not instance:
         return None
+    deadline = time.monotonic() + 5
+    while scheduler_running(log_dir, instance, fresh=True) is not True:
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(1)
     path = _instance_config_path(config_path, instance)
     try:
         data = _load_instance_config(path)
