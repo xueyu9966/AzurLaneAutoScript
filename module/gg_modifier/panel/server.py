@@ -468,6 +468,14 @@ def schedule_group_state(config_path, config_name):
     for group in SCHEDULE_GROUPS:
         enabled = [task for task in group["tasks"] if _scheduler_enabled(data, task)]
         master, selected = _group_memory(saved, group, data)
+        if enabled:
+            # Something is actually running: the gate is effectively open and
+            # the instance config is the source of truth for the selection.
+            master = True
+            selected = enabled
+        elif master:
+            # Gate open but nothing runs: the instance selection is empty.
+            selected = []
         groups.append({
             "id": group["id"],
             "label": group["label"],

@@ -315,3 +315,44 @@ class TaskGroupTests(unittest.TestCase):
         self.assertEqual(group["enabled"], ["Main", "Main3"])
         self.assertTrue(group["partial"])
         self.assertFalse(group["all"])
+
+    def test_manual_instance_change_is_reflected_while_gate_open(self):
+        (self.data_dir / "task_groups.json").write_text(
+            json.dumps({"sample": {"event_daily": {"master": True, "selected": []}}}),
+            encoding="utf-8",
+        )
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["EventA"]["Scheduler"]["Enable"] = True
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        group = panel.schedule_group_state(self.config_path, "sample")["groups"][2]
+        self.assertTrue(group["master"])
+        self.assertEqual(group["selected"], ["EventA"])
+        self.assertEqual(group["enabled"], ["EventA"])
+
+    def test_manual_enable_with_gate_closed_is_reflected(self):
+        (self.data_dir / "task_groups.json").write_text(
+            json.dumps({"sample": {"main": {"master": False, "selected": ["Main"]}}}),
+            encoding="utf-8",
+        )
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        for task in ("Main", "Main2", "Main3"):
+            data[task]["Scheduler"]["Enable"] = False
+        data["Main2"]["Scheduler"]["Enable"] = True
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        group = panel.schedule_group_state(self.config_path, "sample")["groups"][0]
+        self.assertTrue(group["master"])
+        self.assertEqual(group["selected"], ["Main2"])
+        self.assertEqual(group["enabled"], ["Main2"])
+
+    def test_gate_open_with_all_tasks_off_shows_empty_selection(self):
+        (self.data_dir / "task_groups.json").write_text(
+            json.dumps({"sample": {"event": {"master": True, "selected": ["Event"]}}}),
+            encoding="utf-8",
+        )
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["Event"]["Scheduler"]["Enable"] = False
+        data["Event2"]["Scheduler"]["Enable"] = False
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        group = panel.schedule_group_state(self.config_path, "sample")["groups"][1]
+        self.assertTrue(group["master"])
+        self.assertEqual(group["selected"], [])
