@@ -86,10 +86,13 @@ TASK_GROUPS = {
 # Scheduler task groups shown as quick switches.  These control the ALAS
 # instance's Scheduler.Enable flags, not the GG modifier whitelist above.
 SCHEDULE_GROUPS = [
-    {"id": "main", "label": "主线图 1/2/3", "tasks": ["Main", "Main2", "Main3"]},
-    {"id": "event", "label": "活动图 1/2", "tasks": ["Event", "Event2"]},
-    {"id": "event_daily", "label": "活动每日 A/B/C/D",
-     "tasks": ["EventA", "EventB", "EventC", "EventD"]},
+    {"id": "farm", "label": "出击", "tasks": ["Main", "Main2", "Main3", "GemsFarming"]},
+    {"id": "event", "label": "活动", "tasks": [
+        "Coalition", "Event", "Event2", "Raid", "Hospital", "EventShop", "WarArchives",
+    ]},
+    {"id": "event_daily", "label": "活动每日", "tasks": [
+        "CoalitionSp", "EventA", "EventB", "EventC", "EventD", "EventSp", "RaidDaily",
+    ]},
 ]
 _SCHEDULE_GROUP_BY_ID = {group["id"]: group for group in SCHEDULE_GROUPS}
 _TASK_GROUP_LOCK = threading.Lock()

@@ -166,6 +166,13 @@ class MonitorTests(unittest.TestCase):
 
 
 class PauseGroupTests(unittest.TestCase):
+    TASKS = (
+        "Main", "Main2", "Main3", "GemsFarming",
+        "EventGeneral", "Coalition", "Event", "Event2", "Raid", "Hospital",
+        "EventShop", "WarArchives",
+        "CoalitionSp", "EventA", "EventB", "EventC", "EventD", "EventSp", "RaidDaily",
+    )
+
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -178,44 +185,43 @@ class PauseGroupTests(unittest.TestCase):
         change.start()
         self.addCleanup(change.stop)
         self.sample = self.config_dir / "sample.json"
-        self.sample.write_text(json.dumps({
-            "Main": {"Scheduler": {"Enable": True}},
-            "Main2": {"Scheduler": {"Enable": False}},
-            "Main3": {"Scheduler": {"Enable": True}},
-            "Event": {"Scheduler": {"Enable": True}},
-            "Event2": {"Scheduler": {"Enable": False}},
-            "EventA": {"Scheduler": {"Enable": True}},
-            "EventB": {"Scheduler": {"Enable": False}},
-            "EventC": {"Scheduler": {"Enable": True}},
-            "EventD": {"Scheduler": {"Enable": False}},
-        }), encoding="utf-8")
+        data = {task: {"Scheduler": {"Enable": True}} for task in self.TASKS}
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
         self.config_path = str(self.settings)
 
     def states(self):
         data = json.loads(self.sample.read_text(encoding="utf-8"))
-        return {key: data[key]["Scheduler"]["Enable"] for key in (
-            "Main", "Main2", "Main3", "Event", "Event2",
-            "EventA", "EventB", "EventC", "EventD",
-        )}
+        return {key: data[key]["Scheduler"]["Enable"] for key in self.TASKS}
 
-    def test_pause_main_disables_all_three_branches(self):
-        ok, message = panel.pause_schedule_group(self.config_path, "sample", "main")
+    def test_pause_farm_disables_all_farm_tasks(self):
+        ok, message = panel.pause_schedule_group(self.config_path, "sample", "farm")
         self.assertTrue(ok, message)
         states = self.states()
-        self.assertFalse(states["Main"] or states["Main2"] or states["Main3"])
+        self.assertFalse(any(states[key] for key in ("Main", "Main2", "Main3", "GemsFarming")))
+        self.assertTrue(states["EventGeneral"])
         self.assertTrue(states["Event"])
-        self.assertFalse((self.config_dir / "gg_modifier" / "task_groups.json").exists())
 
-    def test_pause_event_daily_disables_all_four_branches(self):
+    def test_pause_event_disables_all_event_tasks_but_not_general(self):
+        ok, message = panel.pause_schedule_group(self.config_path, "sample", "event")
+        self.assertTrue(ok, message)
+        states = self.states()
+        self.assertTrue(states["EventGeneral"])
+        self.assertFalse(any(states[key] for key in (
+            "Coalition", "Event", "Event2", "Raid", "Hospital", "EventShop", "WarArchives",
+        )))
+
+    def test_pause_event_daily_disables_all_daily_tasks(self):
         ok, message = panel.pause_schedule_group(self.config_path, "sample", "event_daily")
         self.assertTrue(ok, message)
         states = self.states()
-        self.assertFalse(any(states[key] for key in ("EventA", "EventB", "EventC", "EventD")))
-        self.assertTrue(states["Main"] or states["Main3"])
+        self.assertFalse(any(states[key] for key in (
+            "CoalitionSp", "EventA", "EventB", "EventC", "EventD", "EventSp", "RaidDaily",
+        )))
+        self.assertTrue(states["Main"])
 
     def test_pause_rejects_unknown_group_and_instance(self):
         self.assertFalse(panel.pause_schedule_group(self.config_path, "sample", "nope")[0])
-        self.assertFalse(panel.pause_schedule_group(self.config_path, "missing", "main")[0])
+        self.assertFalse(panel.pause_schedule_group(self.config_path, "missing", "farm")[0])
 
 
 class PanelPidCacheTests(unittest.TestCase):
