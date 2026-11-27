@@ -389,222 +389,35 @@ def _write_instance_config(path, data):
     os.replace(tmp, path)
 
 
-def _task_group_state_path():
-    return os.path.join(alas_gg.DATA_DIR, "task_groups.json")
-
-
-def _load_task_group_state():
-    try:
-        with open(_task_group_state_path(), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        return {}
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _save_task_group_state(data):
-    os.makedirs(alas_gg.DATA_DIR, exist_ok=True)
-    _save_state_file(_task_group_state_path(), data)
-
-
-def _scheduler_enabled(data, task):
-    entry = data.get(task)
-    scheduler = entry.get("Scheduler") if isinstance(entry, dict) else None
-    return bool(isinstance(scheduler, dict) and scheduler.get("Enable") is True)
-
-
-def _group_memory(saved, group, data):
-    """Return (master, selected), migrating the old remembered-list format."""
-    raw = saved.get(group["id"])
-    actual = [task for task in group["tasks"] if _scheduler_enabled(data, task)]
-    if isinstance(raw, dict):
-        selected = [task for task in group["tasks"] if task in raw.get("selected", [])]
-        return bool(raw.get("master")), selected
-    if isinstance(raw, list):
-        selected = [task for task in group["tasks"] if task in raw]
-    else:
-        selected = actual
-    # The old format only remembered the selection; the gate was open iff a
-    # task was actually enabled.
-    return bool(actual), selected
-
-
-def _store_group_memory(state_data, config_name, group_id, master, selected):
-    per_instance = state_data.setdefault(config_name, {})
-    if not isinstance(per_instance, dict):
-        per_instance = {}
-        state_data[config_name] = per_instance
-    per_instance[group_id] = {"master": bool(master), "selected": list(selected)}
-
-
-def _apply_group(data, group, existing, master, selected):
-    for task in group["tasks"]:
-        if task not in existing:
-            continue
-        entry = data[task]
-        scheduler = entry.setdefault("Scheduler", {})
-        if not isinstance(scheduler, dict):
-            scheduler = {}
-            entry["Scheduler"] = scheduler
-        scheduler["Enable"] = bool(master and task in selected)
-
-
-def schedule_group_state(config_path, config_name):
-    """Read the three scheduler quick-switch groups for one instance."""
-    path = _instance_config_path(config_path, config_name)
-    available = bool(config_name) and os.path.isfile(path)
-    data = {}
-    if available:
-        try:
-            data = _load_instance_config(path)
-        except (OSError, ValueError):
-            available = False
-    saved = _load_task_group_state().get(config_name, {})
-    if not isinstance(saved, dict):
-        saved = {}
-    groups = []
-    for group in SCHEDULE_GROUPS:
-        enabled = [task for task in group["tasks"] if _scheduler_enabled(data, task)]
-        master, selected = _group_memory(saved, group, data)
-        if enabled:
-            # Something is actually running: the gate is effectively open and
-            # the instance config is the source of truth for the selection.
-            master = True
-            selected = enabled
-        elif master:
-            # Gate open but nothing runs: the instance selection is empty.
-            selected = []
-        groups.append({
-            "id": group["id"],
-            "label": group["label"],
-            "tasks": list(group["tasks"]),
-            "master": master,
-            "selected": selected,
-            "enabled": enabled,
-            "on": master,
-            "all": len(selected) == len(group["tasks"]),
-            "partial": bool(selected) and len(selected) < len(group["tasks"]),
-            "remembered": selected,
-        })
-    return {"available": available, "groups": groups}
-
-
-def set_schedule_group(config_path, config_name, group_id, enabled):
-    """Open/close one group gate; the per-task selection is preserved."""
+def pause_schedule_group(config_path, config_name, group_id):
+    """Disable every task in one scheduler group (one-way pause)."""
     group = _SCHEDULE_GROUP_BY_ID.get(str(group_id))
     if group is None:
-        return False, "未知任务组", None
+        return False, "未知任务组"
     if not config_name or config_name not in list_instances(config_path):
-        return False, "实例不存在", None
-    if not isinstance(enabled, bool):
-        return False, "enabled 必须是 true 或 false", None
+        return False, "实例不存在"
     path = _instance_config_path(config_path, config_name)
     with _TASK_GROUP_LOCK:
         try:
             data = _load_instance_config(path)
         except (OSError, ValueError) as error:
-            return False, f"读取实例配置失败: {error}", None
+            return False, f"读取实例配置失败: {error}"
         existing = [task for task in group["tasks"] if isinstance(data.get(task), dict)]
-        state_data = _load_task_group_state()
-        saved = state_data.get(config_name, {})
-        if not isinstance(saved, dict):
-            saved = {}
-        master, selected = _group_memory(saved, group, data)
-        actual = [task for task in existing if _scheduler_enabled(data, task)]
-
-        if enabled == master:
-            _apply_group(data, group, existing, master, selected)
-            try:
-                _write_instance_config(path, data)
-            except OSError as error:
-                return False, f"写入实例配置失败: {error}", None
-            return True, "该组总开关已经" + ("打开" if master else "关闭"), schedule_group_state(config_path, config_name)
-
-        if enabled:
-            _apply_group(data, group, existing, True, selected)
-            try:
-                _write_instance_config(path, data)
-            except OSError as error:
-                return False, f"写入实例配置失败: {error}", None
-            _store_group_memory(state_data, config_name, group["id"], True, selected)
-            try:
-                _save_task_group_state(state_data)
-            except OSError as error:
-                _plog(f"task group state save failed: {error}")
-            message = "总开关已打开" + (
-                "：" + "、".join(selected) if selected else "，当前未选择任务"
-            )
-            _plog("task group {}/{} open: {}".format(config_name, group["id"], selected))
-            return True, message, schedule_group_state(config_path, config_name)
-
-        target = actual if master else selected
-        _apply_group(data, group, existing, False, target)
+        if not existing:
+            return False, "实例中没有该组任务"
+        for task in existing:
+            entry = data[task]
+            scheduler = entry.setdefault("Scheduler", {})
+            if not isinstance(scheduler, dict):
+                scheduler = {}
+                entry["Scheduler"] = scheduler
+            scheduler["Enable"] = False
         try:
             _write_instance_config(path, data)
         except OSError as error:
-            return False, f"写入实例配置失败: {error}", None
-        _store_group_memory(state_data, config_name, group["id"], False, target)
-        try:
-            _save_task_group_state(state_data)
-        except OSError as error:
-            return False, f"保存任务组状态失败: {error}", None
-        message = "总开关已关闭，保留选择：" + ("、".join(target) if target else "无")
-        _plog("task group {}/{} close: {}".format(config_name, group["id"], target))
-        return True, message, schedule_group_state(config_path, config_name)
-
-
-def set_schedule_task(config_path, config_name, task_name, enabled):
-    """Toggle one selected task; only effective while the group gate is open."""
-    task_name = str(task_name)
-    group = next((item for item in SCHEDULE_GROUPS if task_name in item["tasks"]), None)
-    if group is None:
-        return False, "未知任务", None
-    if not config_name or config_name not in list_instances(config_path):
-        return False, "实例不存在", None
-    if not isinstance(enabled, bool):
-        return False, "enabled 必须是 true 或 false", None
-    path = _instance_config_path(config_path, config_name)
-    with _TASK_GROUP_LOCK:
-        try:
-            data = _load_instance_config(path)
-        except (OSError, ValueError) as error:
-            return False, f"读取实例配置失败: {error}", None
-        if not isinstance(data.get(task_name), dict):
-            return False, "实例中没有该任务", None
-        state_data = _load_task_group_state()
-        saved = state_data.get(config_name, {})
-        if not isinstance(saved, dict):
-            saved = {}
-        master, _selected = _group_memory(saved, group, data)
-        if not master:
-            return False, "请先打开该组总开关", schedule_group_state(config_path, config_name)
-        existing = [task for task in group["tasks"] if isinstance(data.get(task), dict)]
-        selected = [task for task in existing if _scheduler_enabled(data, task)]
-        if enabled:
-            if task_name not in selected:
-                selected.append(task_name)
-        elif task_name in selected:
-            selected.remove(task_name)
-        selected = [task for task in group["tasks"] if task in selected]
-        entry = data[task_name]
-        scheduler = entry.setdefault("Scheduler", {})
-        if not isinstance(scheduler, dict):
-            scheduler = {}
-            entry["Scheduler"] = scheduler
-        scheduler["Enable"] = enabled
-        try:
-            _write_instance_config(path, data)
-        except OSError as error:
-            return False, f"写入实例配置失败: {error}", None
-        _store_group_memory(state_data, config_name, group["id"], True, selected)
-        try:
-            _save_task_group_state(state_data)
-        except OSError as error:
-            _plog(f"task group state save failed: {error}")
-        _plog("task {}/{} -> {}".format(config_name, task_name, enabled))
-        return True, ("已选择：" if enabled else "已取消：") + task_name, schedule_group_state(config_path, config_name)
+            return False, f"写入实例配置失败: {error}"
+        _plog("paused group {}/{}: {}".format(config_name, group["id"], existing))
+        return True, "已暂停：" + "、".join(existing)
 
 
 _SERIAL_CACHE = {}
@@ -926,7 +739,6 @@ def get_state(config_path, log_dir, alas_port, config_name=None):
         "alas": alas_state(log_dir, alas_port, config_name),
         "resources": resource_state(config_name),
         "task_groups": TASK_GROUPS,
-        "schedule_groups": schedule_group_state(config_path, config_name),
         "task_names": TASK_DISPLAY,
     }
 
@@ -1202,40 +1014,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
             return
 
-        if path == "/api/schedule_task":
-            enabled = body.get("enabled")
-            if not isinstance(enabled, bool):
-                self._json(400, {"ok": False, "error": "enabled must be true or false"})
-                return
+        if path == "/api/pause_group":
             try:
-                ok, message, groups = set_schedule_task(
-                    self.config_path, body.get("config"), body.get("task"), enabled
+                ok, message = pause_schedule_group(
+                    self.config_path, body.get("config"), body.get("group")
                 )
             except Exception as e:
                 self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
                 return
-            payload = {"ok": ok, "message": message}
-            if groups is not None:
-                payload["schedule_groups"] = groups
-            self._json(200 if ok else 400, payload)
-            return
-
-        if path == "/api/task_group":
-            enabled = body.get("enabled")
-            if not isinstance(enabled, bool):
-                self._json(400, {"ok": False, "error": "enabled must be true or false"})
-                return
-            try:
-                ok, message, groups = set_schedule_group(
-                    self.config_path, body.get("config"), body.get("group"), enabled
-                )
-            except Exception as e:
-                self._json(500, {"ok": False, "error": f"{type(e).__name__}: {e}"})
-                return
-            payload = {"ok": ok, "message": message}
-            if groups is not None:
-                payload["schedule_groups"] = groups
-            self._json(200 if ok else 400, payload)
+            self._json(200 if ok else 400, {"ok": ok, "message": message})
             return
 
         if path == "/api/action":
