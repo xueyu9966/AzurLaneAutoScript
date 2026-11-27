@@ -97,6 +97,13 @@ SCHEDULE_GROUPS = [
 _SCHEDULE_GROUP_BY_ID = {group["id"]: group for group in SCHEDULE_GROUPS}
 _TASK_GROUP_LOCK = threading.Lock()
 
+AUTO_FARM_PATH = os.path.join(alas_gg.DATA_DIR, "auto_farm.json")
+AUTO_FARM_START = 24000
+AUTO_FARM_STOP = 22000
+AUTO_FARM_TASKS = ("Main", "Main2")
+AUTO_FARM_MAX_AGE = 3600
+_AUTO_FARM_LOCK = threading.Lock()
+
 # original task name -> localized name (loaded from ALAS i18n)
 TASK_DISPLAY = {}
 # normalized original/display name -> original task name
@@ -390,6 +397,12 @@ def _write_instance_config(path, data):
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
+def _scheduler_enabled(data, task):
+    entry = data.get(task)
+    scheduler = entry.get("Scheduler") if isinstance(entry, dict) else None
+    return bool(isinstance(scheduler, dict) and scheduler.get("Enable") is True)
 
 
 def pause_schedule_group(config_path, config_name, group_id):
@@ -952,6 +965,151 @@ def _guard_loop(config_path, log_dir):
         time.sleep(60)
 
 
+def _load_auto_farm():
+    default = {"active": False, "armed": True, "tasks": [], "last_oil": None}
+    try:
+        with open(AUTO_FARM_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    for key, value in default.items():
+        data.setdefault(key, value)
+    return data
+
+
+def _save_auto_farm(state):
+    os.makedirs(os.path.dirname(AUTO_FARM_PATH), exist_ok=True)
+    _save_state_file(AUTO_FARM_PATH, state)
+
+
+def _latest_oil(instance):
+    latest = (resource_state(instance) or {}).get("latest")
+    if not isinstance(latest, dict):
+        return None, None
+    try:
+        oil = int(latest.get("oil") or 0)
+    except (TypeError, ValueError):
+        return None, None
+    try:
+        age = time.time() - time.mktime(
+            time.strptime(str(latest.get("time")), "%Y-%m-%d %H:%M:%S")
+        )
+    except (TypeError, ValueError):
+        age = None
+    return oil, age
+
+
+def auto_farm_once(config_path, log_dir):
+    """Enable Main/Main2 at high oil, then stop only those tasks at low oil."""
+    cfg = load_config(config_path)
+    instances = list_instances(config_path)
+    instance = cfg.get("Instance") or latest_instance(log_dir, instances)
+    if not instance or scheduler_running(log_dir, instance) is not True:
+        return None
+    path = _instance_config_path(config_path, instance)
+    try:
+        data = _load_instance_config(path)
+    except (OSError, ValueError) as error:
+        _plog(f"auto farm config read failed: {error}")
+        return None
+    oil, age = _latest_oil(instance)
+    if oil is None or (age is not None and age > AUTO_FARM_MAX_AGE):
+        return None
+    any_enabled = any(
+        _scheduler_enabled(data, task)
+        for group in SCHEDULE_GROUPS
+        for task in group["tasks"]
+    )
+    with _AUTO_FARM_LOCK:
+        state = _load_auto_farm()
+        active = bool(state.get("active"))
+        armed = bool(state.get("armed", True))
+        tasks = [task for task in state.get("tasks", []) if task in AUTO_FARM_TASKS]
+        changed = False
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+
+        if active:
+            enabled_now = [task for task in tasks if _scheduler_enabled(data, task)]
+            if not enabled_now:
+                state.update(
+                    active=False, armed=False, last_oil=oil,
+                    stopped_at=now, last_action="stopped_externally",
+                )
+                changed = True
+                _plog(f"auto farm: tasks stopped externally at oil={oil}")
+            elif oil <= AUTO_FARM_STOP:
+                for task in tasks:
+                    entry = data.get(task)
+                    if not isinstance(entry, dict):
+                        continue
+                    scheduler = entry.setdefault("Scheduler", {})
+                    if not isinstance(scheduler, dict):
+                        scheduler = {}
+                        entry["Scheduler"] = scheduler
+                    scheduler["Enable"] = False
+                try:
+                    _write_instance_config(path, data)
+                except OSError as error:
+                    _plog(f"auto farm config write failed: {error}")
+                    return state
+                state.update(
+                    active=False, armed=False, last_oil=oil,
+                    stopped_at=now, last_action="stopped_low_oil",
+                )
+                changed = True
+                _plog(f"auto farm: stopped {tasks} at oil={oil}")
+            elif state.get("last_oil") != oil:
+                state["last_oil"] = oil
+                changed = True
+        else:
+            if oil < AUTO_FARM_START and not armed:
+                state["armed"] = True
+                changed = True
+            if state.get("armed", True) and oil >= AUTO_FARM_START and not any_enabled:
+                existing = [
+                    task for task in AUTO_FARM_TASKS if isinstance(data.get(task), dict)
+                ]
+                if existing:
+                    for task in existing:
+                        entry = data[task]
+                        scheduler = entry.setdefault("Scheduler", {})
+                        if not isinstance(scheduler, dict):
+                            scheduler = {}
+                            entry["Scheduler"] = scheduler
+                        scheduler["Enable"] = True
+                        scheduler["NextRun"] = now
+                    try:
+                        _write_instance_config(path, data)
+                    except OSError as error:
+                        _plog(f"auto farm config write failed: {error}")
+                        return state
+                    state.update(
+                        active=True, armed=False, tasks=existing, started_at=now,
+                        start_oil=oil, last_oil=oil, last_action="started",
+                    )
+                    changed = True
+                    _plog(f"auto farm: started {existing} at oil={oil}")
+        if changed:
+            try:
+                _save_auto_farm(state)
+            except OSError as error:
+                _plog(f"auto farm state write failed: {error}")
+        return state
+
+
+def _auto_farm_loop(config_path, log_dir):
+    while True:
+        try:
+            auto_farm_once(config_path, log_dir)
+        except Exception as e:
+            _plog(f"auto farm error: {type(e).__name__}: {e}")
+        time.sleep(30)
+
+
 # ---------------- HTTP ----------------
 class Handler(BaseHTTPRequestHandler):
     config_path = DEFAULT_CONFIG_PATH
@@ -1072,6 +1230,9 @@ def main():
     ).start()
     threading.Thread(
         target=_resource_loop, args=(args.log_dir,), daemon=True
+    ).start()
+    threading.Thread(
+        target=_auto_farm_loop, args=(args.config, args.log_dir), daemon=True
     ).start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)

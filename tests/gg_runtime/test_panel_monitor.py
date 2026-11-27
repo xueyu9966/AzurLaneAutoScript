@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 import sys
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -233,3 +234,121 @@ class PanelPidCacheTests(unittest.TestCase):
             self.assertEqual(panel.game_pid("serial", "package"), 123)
             self.assertEqual(panel.game_pid("serial", "package"), 123)
             self.assertEqual(patcher.return_value.get_pid.call_count, 1)
+
+
+class AutoFarmTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.config_dir = self.root / "config"
+        (self.config_dir / "gg_modifier").mkdir(parents=True)
+        self.settings = self.config_dir / "gg_modifier" / "settings.json"
+        self.settings.write_text("{}", encoding="utf-8")
+        self.data_dir = self.root / "data"
+        self.data_dir.mkdir()
+        self.config_path = str(self.settings)
+        self.log_dir = str(self.root / "log")
+        self.sample = self.config_dir / "sample.json"
+        data = {task: {"Scheduler": {"Enable": False, "NextRun": "2020-01-01 00:00:00"}}
+                for task in (
+                    "Main", "Main2", "Main3", "GemsFarming", "Coalition", "Event",
+                    "Event2", "Raid", "Hospital", "EventShop", "WarArchives",
+                    "CoalitionSp", "EventA", "EventB", "EventC", "EventD", "EventSp",
+                    "RaidDaily",
+                )}
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        self.oil = 0
+        self.scheduler = True
+        for change in [
+            patch.object(panel, "AUTO_FARM_PATH", str(self.data_dir / "auto_farm.json")),
+            patch.object(panel, "_plog"),
+            patch.object(panel, "scheduler_running", side_effect=lambda *_: self.scheduler),
+            patch.object(panel, "resource_state", side_effect=lambda *_: {
+                "latest": {"oil": self.oil, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
+            }),
+        ]:
+            change.start()
+            self.addCleanup(change.stop)
+
+    def states(self):
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        return {key: data[key]["Scheduler"]["Enable"] for key in ("Main", "Main2", "Main3")}
+
+    def test_starts_main1_main2_at_24000(self):
+        self.oil = 24500
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertTrue(state["active"])
+        self.assertFalse(state["armed"])
+        states = self.states()
+        self.assertTrue(states["Main"] and states["Main2"])
+        self.assertFalse(states["Main3"])
+
+    def test_stops_at_22000(self):
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["Main"]["Scheduler"]["Enable"] = True
+        data["Main2"]["Scheduler"]["Enable"] = True
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
+            "active": True, "armed": False, "tasks": ["Main", "Main2"],
+        }), encoding="utf-8")
+        self.oil = 22000
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertEqual(state["last_action"], "stopped_low_oil")
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_external_stop_rearms_below_24000(self):
+        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
+            "active": True, "armed": False, "tasks": ["Main", "Main2"],
+        }), encoding="utf-8")
+        self.oil = 24500
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertFalse(state["armed"])
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+        self.oil = 23500
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertTrue(state["armed"])
+
+        self.oil = 24500
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertTrue(state["active"])
+        self.assertTrue(self.states()["Main"] and self.states()["Main2"])
+
+    def test_does_not_trigger_when_any_task_enabled(self):
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["Main3"]["Scheduler"]["Enable"] = True
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        self.oil = 24500
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_does_not_trigger_when_scheduler_stopped(self):
+        self.scheduler = False
+        self.oil = 24500
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertIsNone(state)
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_after_our_stop_does_not_stop_user_reenabled_tasks(self):
+        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
+            "active": True, "armed": False, "tasks": ["Main", "Main2"],
+        }), encoding="utf-8")
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["Main"]["Scheduler"]["Enable"] = True
+        data["Main2"]["Scheduler"]["Enable"] = True
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        self.oil = 22000
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["Main"]["Scheduler"]["Enable"] = True
+        data["Main2"]["Scheduler"]["Enable"] = True
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertTrue(self.states()["Main"] and self.states()["Main2"])
