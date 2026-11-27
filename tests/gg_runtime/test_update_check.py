@@ -94,3 +94,54 @@ class UpdateCheckTests(unittest.TestCase):
         with patch.object(uc, "current_event", return_value=uc.campaign_info("event_20261022_cn")), \
                 patch.object(uc, "wiki_events", side_effect=OSError("network")):
             self.assertEqual(uc.check("sample")["status"], "wiki_error")
+
+    def write_settings(self, tasks):
+        path = self.root / "config" / "gg_modifier" / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"Tasks": tasks}), encoding="utf-8")
+        return path
+
+    def read_tasks(self, path):
+        return json.loads(path.read_text(encoding="utf-8"))["Tasks"]
+
+    def test_new_coalition_resets_multiplier(self):
+        settings = self.write_settings({"Coalition": True, "CoalitionSp": True, "Main": True})
+        Path(uc.REPORT_PATH).write_text(
+            json.dumps({"last_coalition": "coalition_20260723"}), encoding="utf-8"
+        )
+        event = uc.campaign_info("coalition_20261124")
+        with patch.object(uc, "current_event", return_value=event), \
+                patch.object(uc, "coalition_campaign", return_value="coalition_20261124"), \
+                patch.object(uc, "wiki_events", return_value=[]):
+            report = uc.check("sample")
+        self.assertIn("reset_coalition_multiplier", report["actions"])
+        self.assertEqual(report["last_coalition"], "coalition_20261124")
+        tasks = self.read_tasks(settings)
+        self.assertNotIn("Coalition", tasks)
+        self.assertNotIn("CoalitionSp", tasks)
+        self.assertTrue(tasks["Main"])
+
+    def test_same_coalition_does_not_reset(self):
+        settings = self.write_settings({"Coalition": True, "CoalitionSp": True})
+        Path(uc.REPORT_PATH).write_text(
+            json.dumps({"last_coalition": "coalition_20261124"}), encoding="utf-8"
+        )
+        event = uc.campaign_info("coalition_20261124")
+        with patch.object(uc, "current_event", return_value=event), \
+                patch.object(uc, "coalition_campaign", return_value="coalition_20261124"), \
+                patch.object(uc, "wiki_events", return_value=[]):
+            report = uc.check("sample")
+        self.assertEqual(report["actions"], [])
+        self.assertTrue(self.read_tasks(settings)["Coalition"])
+
+    def test_first_run_records_baseline_without_reset(self):
+        settings = self.write_settings({"Coalition": True})
+        Path(uc.REPORT_PATH).unlink(missing_ok=True)
+        event = uc.campaign_info("coalition_20261124")
+        with patch.object(uc, "current_event", return_value=event), \
+                patch.object(uc, "coalition_campaign", return_value="coalition_20261124"), \
+                patch.object(uc, "wiki_events", return_value=[]):
+            report = uc.check("sample")
+        self.assertEqual(report["actions"], [])
+        self.assertEqual(report["last_coalition"], "coalition_20261124")
+        self.assertTrue(self.read_tasks(settings)["Coalition"])

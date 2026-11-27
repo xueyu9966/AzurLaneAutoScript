@@ -40,15 +40,20 @@ def campaign_info(name):
     }
 
 
-def current_event(instance):
-    """Return the newest coalition/event campaign configured for an instance."""
+def load_instance(instance):
     path = os.path.join(ALAS_ROOT, "config", f"{instance}.json")
     try:
         with open(path, "r", encoding="utf-8") as stream:
             data = json.load(stream)
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
+    return data if isinstance(data, dict) else None
+
+
+def current_event(instance):
+    """Return the newest coalition/event campaign configured for an instance."""
+    data = load_instance(instance)
+    if data is None:
         return None
     campaigns = []
     for task in TASKS:
@@ -62,6 +67,72 @@ def current_event(instance):
     if not campaigns:
         return None
     return max(campaigns, key=lambda item: item["date"])
+
+
+def coalition_campaign(instance):
+    """Return the newest coalition campaign configured for an instance."""
+    data = load_instance(instance)
+    if data is None:
+        return None
+    campaigns = []
+    for task in ("Coalition", "CoalitionSp"):
+        entry = data.get(task)
+        if not isinstance(entry, dict):
+            continue
+        info = campaign_info((entry.get("Campaign") or {}).get("Event"))
+        if info and info["kind"] == "coalition":
+            campaigns.append(info)
+    if not campaigns:
+        return None
+    return max(campaigns, key=lambda item: item["date"])["campaign"]
+
+
+def settings_path():
+    return os.path.join(ALAS_ROOT, "config", "gg_modifier", "settings.json")
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as stream:
+            data = json.load(stream)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = path + ".tmp"
+    with open(temp, "w", encoding="utf-8") as stream:
+        json.dump(data, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temp, path)
+
+
+def reset_coalition_multiplier(log=None):
+    """Turn off the Coalition/CoalitionSp multiplier for a new coalition event."""
+    path = settings_path()
+    data = _read_json(path)
+    tasks = data.get("Tasks")
+    if not isinstance(tasks, dict):
+        return False
+    changed = False
+    for task in ("Coalition", "CoalitionSp"):
+        if task in tasks:
+            tasks.pop(task, None)
+            changed = True
+    if not changed:
+        return False
+    try:
+        _write_json(path, data)
+    except OSError as error:
+        if log:
+            log(f"coalition multiplier reset write failed: {error}")
+        return False
+    if log:
+        log("new coalition event; reset Coalition/CoalitionSp multiplier to off")
+    return True
 
 
 def _get_json(url, timeout=15):
@@ -117,6 +188,26 @@ def _write_report(report):
 def check(instance, log=None):
     """Check the configured event type and whether the wiki has a newer page."""
     event = current_event(instance)
+    coalition = coalition_campaign(instance)
+    previous = _read_json(REPORT_PATH)
+    last_coalition = previous.get("last_coalition") if isinstance(previous, dict) else None
+    actions = []
+    if coalition and coalition != last_coalition:
+        if last_coalition:
+            try:
+                if reset_coalition_multiplier(log):
+                    actions.append("reset_coalition_multiplier")
+            except Exception as error:
+                actions.append("reset_coalition_multiplier_failed")
+                if log:
+                    log(
+                        "coalition multiplier reset failed: "
+                        f"{type(error).__name__}: {error}"
+                    )
+        last_coalition = coalition
+    elif coalition:
+        last_coalition = coalition
+
     wiki = []
     status = "ok"
     message = ""
@@ -150,6 +241,9 @@ def check(instance, log=None):
         "time": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "instance": instance,
         "config": event,
+        "coalition": coalition,
+        "last_coalition": last_coalition,
+        "actions": actions,
         "wiki": latest,
         "status": status,
         "message": message,
@@ -166,8 +260,9 @@ def check(instance, log=None):
         )
         wiki_text = latest["title"] if latest else "无"
         log(
-            "update check: event={} wiki={} status={} message={}".format(
-                event_text, wiki_text, status, message
+            "update check: event={} coalition={} wiki={} status={} actions={} message={}".format(
+                event_text, coalition or "无", wiki_text, status,
+                ",".join(actions) or "无", message,
             )
         )
     return report
