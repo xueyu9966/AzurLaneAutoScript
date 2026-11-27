@@ -458,6 +458,12 @@ def do_stop(cfg, role, cycle, now, dry_run=False):
     state["phase"] = "stopped"
     save_state(state)
     log("stop confirmed: instances={} VM={}".format(state["instances"], state["vm"]))
+    if not dry_run:
+        try:
+            from module.gg_modifier.maintenance.update_check import check_updates
+            check_updates(cfg, log)
+        except Exception as error:
+            log("update check failed: {}: {}".format(type(error).__name__, error))
 
 
 def do_start(cfg, role, cycle, dry_run=False):
