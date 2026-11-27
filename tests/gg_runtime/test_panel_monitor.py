@@ -262,6 +262,7 @@ class AutoFarmTests(unittest.TestCase):
         self.scheduler = True
         for change in [
             patch.object(panel, "AUTO_FARM_PATH", str(self.data_dir / "auto_farm.json")),
+            patch.object(panel.alas_gg, "DATA_DIR", str(self.data_dir)),
             patch.object(panel, "_plog"),
             patch.object(panel, "scheduler_running", side_effect=lambda *_: self.scheduler),
             patch.object(panel, "resource_state", side_effect=lambda *_: {
@@ -275,80 +276,105 @@ class AutoFarmTests(unittest.TestCase):
         data = json.loads(self.sample.read_text(encoding="utf-8"))
         return {key: data[key]["Scheduler"]["Enable"] for key in ("Main", "Main2", "Main3")}
 
-    def test_starts_main1_main2_at_24000(self):
-        self.oil = 24500
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
+    def start_state(self, stop_at="2099-01-01 08:00:00"):
+        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
+            "active": True, "armed": False, "tasks": ["Main", "Main2"],
+            "stop_at": stop_at, "last_oil": 20000,
+        }), encoding="utf-8")
+
+    def enable_main(self, enabled=True):
+        data = json.loads(self.sample.read_text(encoding="utf-8"))
+        data["Main"]["Scheduler"]["Enable"] = enabled
+        data["Main2"]["Scheduler"]["Enable"] = enabled
+        self.sample.write_text(json.dumps(data), encoding="utf-8")
+
+    def test_starts_near_24000_when_idle(self):
+        self.oil = 23200
+        state = panel.auto_farm_check(self.config_path, None, self.log_dir)
         self.assertTrue(state["active"])
         self.assertFalse(state["armed"])
+        self.assertTrue(state["stop_at"].endswith("08:00:00"))
         states = self.states()
         self.assertTrue(states["Main"] and states["Main2"])
         self.assertFalse(states["Main3"])
 
-    def test_stops_at_22000(self):
-        data = json.loads(self.sample.read_text(encoding="utf-8"))
-        data["Main"]["Scheduler"]["Enable"] = True
-        data["Main2"]["Scheduler"]["Enable"] = True
-        self.sample.write_text(json.dumps(data), encoding="utf-8")
-        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
-            "active": True, "armed": False, "tasks": ["Main", "Main2"],
-        }), encoding="utf-8")
-        self.oil = 22000
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
-        self.assertFalse(state["active"])
-        self.assertEqual(state["last_action"], "stopped_low_oil")
-        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
-
-    def test_external_stop_rearms_below_24000(self):
-        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
-            "active": True, "armed": False, "tasks": ["Main", "Main2"],
-        }), encoding="utf-8")
-        self.oil = 24500
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
-        self.assertFalse(state["active"])
-        self.assertFalse(state["armed"])
-        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
-
-        self.oil = 23500
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
-        self.assertTrue(state["armed"])
-
-        self.oil = 24500
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
+    def test_starts_at_23000(self):
+        self.oil = 23000
+        state = panel.auto_farm_check(self.config_path, None, self.log_dir)
         self.assertTrue(state["active"])
-        self.assertTrue(self.states()["Main"] and self.states()["Main2"])
 
-    def test_does_not_trigger_when_any_task_enabled(self):
+    def test_does_not_start_below_23000(self):
+        self.oil = 22500
+        state = panel.auto_farm_check(self.config_path, None, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_does_not_start_when_any_task_enabled(self):
         data = json.loads(self.sample.read_text(encoding="utf-8"))
         data["Main3"]["Scheduler"]["Enable"] = True
         self.sample.write_text(json.dumps(data), encoding="utf-8")
-        self.oil = 24500
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.oil = 23200
+        state = panel.auto_farm_check(self.config_path, None, self.log_dir)
         self.assertFalse(state["active"])
         self.assertFalse(self.states()["Main"] or self.states()["Main2"])
 
-    def test_does_not_trigger_when_scheduler_stopped(self):
+    def test_does_not_start_when_scheduler_stopped(self):
         self.scheduler = False
-        self.oil = 24500
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.oil = 23200
+        state = panel.auto_farm_check(self.config_path, None, self.log_dir)
         self.assertIsNone(state)
         self.assertFalse(self.states()["Main"] or self.states()["Main2"])
 
-    def test_after_our_stop_does_not_stop_user_reenabled_tasks(self):
-        Path(panel.AUTO_FARM_PATH).write_text(json.dumps({
-            "active": True, "armed": False, "tasks": ["Main", "Main2"],
+    def test_monitor_stops_at_18000(self):
+        self.enable_main()
+        self.start_state()
+        self.oil = 18000
+        state = panel.auto_farm_monitor_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertEqual(state["last_action"], "stopped_low_oil")
+        self.assertEqual(state["stop_threshold"], 18000)
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_monitor_stops_at_20000_on_event_day(self):
+        (self.data_dir / "update_check.json").write_text(json.dumps({
+            "wiki": {"timestamp": time.strftime("%Y-%m-%dT15:00:00Z")},
         }), encoding="utf-8")
-        data = json.loads(self.sample.read_text(encoding="utf-8"))
-        data["Main"]["Scheduler"]["Enable"] = True
-        data["Main2"]["Scheduler"]["Enable"] = True
-        self.sample.write_text(json.dumps(data), encoding="utf-8")
-        self.oil = 22000
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.assertEqual(panel.auto_farm_stop_threshold(), 20000)
+        self.enable_main()
+        self.start_state()
+        self.oil = 20000
+        state = panel.auto_farm_monitor_once(self.config_path, self.log_dir)
+        self.assertEqual(state["last_action"], "stopped_low_oil")
+        self.assertEqual(state["stop_threshold"], 20000)
+
+    def test_monitor_stops_at_8am(self):
+        self.enable_main()
+        self.start_state(stop_at="2020-01-01 00:00:00")
+        self.oil = 20000
+        state = panel.auto_farm_monitor_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertEqual(state["last_action"], "stopped_time")
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_monitor_external_stop(self):
+        self.start_state()
+        self.oil = 20000
+        state = panel.auto_farm_monitor_once(self.config_path, self.log_dir)
+        self.assertFalse(state["active"])
+        self.assertEqual(state["last_action"], "stopped_externally")
+        self.assertFalse(self.states()["Main"] or self.states()["Main2"])
+
+    def test_after_stop_does_not_stop_user_reenabled_tasks(self):
+        self.enable_main()
+        self.start_state()
+        self.oil = 18000
+        state = panel.auto_farm_monitor_once(self.config_path, self.log_dir)
         self.assertFalse(state["active"])
 
-        data = json.loads(self.sample.read_text(encoding="utf-8"))
-        data["Main"]["Scheduler"]["Enable"] = True
-        data["Main2"]["Scheduler"]["Enable"] = True
-        self.sample.write_text(json.dumps(data), encoding="utf-8")
-        state = panel.auto_farm_once(self.config_path, self.log_dir)
+        self.enable_main()
+        self.oil = 20000
+        state = panel.auto_farm_check(self.config_path, None, self.log_dir)
+        self.assertFalse(state["active"])
+        state = panel.auto_farm_monitor_once(self.config_path, self.log_dir)
         self.assertFalse(state["active"])
         self.assertTrue(self.states()["Main"] and self.states()["Main2"])

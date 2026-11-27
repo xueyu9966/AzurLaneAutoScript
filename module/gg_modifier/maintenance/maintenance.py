@@ -37,6 +37,7 @@ DEFAULT_CONFIG = {
     ),
     "Serial": "127.0.0.1:16384",
     "ControlPort": 22334,
+    "PanelPort": 22333,
     "WebUIPort": 22267,
     "WebUIExe": os.path.join(ALAS_ROOT, "Alas.exe"),
     "Instances": ["alas小开"],
@@ -511,6 +512,29 @@ def do_start(cfg, role, cycle, dry_run=False):
     log("restore confirmed: {}".format(names))
 
 
+def request_auto_farm_check(cfg):
+    """Ask the panel to run the scheduled auto-farm trigger check."""
+    port = int(cfg.get("PanelPort", 22333))
+    instances = cfg.get("Instances") or []
+    instance = instances[0] if instances else "alas小开"
+    data = json.dumps({"config": instance}).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/auto_farm/check",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    state = result.get("state") or {}
+    if state.get("active"):
+        log("auto farm check: active tasks={} stop_at={} oil={}".format(
+            state.get("tasks"), state.get("stop_at"), state.get("last_oil")))
+    else:
+        log("auto farm check: idle armed={} oil={}".format(
+            state.get("armed"), state.get("last_oil")))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("role", choices=list(ROLE_TITLES))
@@ -519,6 +543,7 @@ def main(argv=None):
     parser.add_argument("--now", help="diagnostic local time YYYY-MM-DD HH:MM")
     parser.add_argument("--scheduled-at", help="original scheduled local time YYYY-MM-DD HH:MM")
     args = parser.parse_args(argv)
+    cfg = None
     try:
         cfg = load_config()
         now = dt.datetime.fromisoformat(args.now) if args.now else dt.datetime.now()
@@ -591,6 +616,12 @@ def main(argv=None):
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
         log("maintenance failed: {}: {}".format(type(error).__name__, error))
         return 1
+    finally:
+        if cfg is not None and not args.dry_run and args.role != "status":
+            try:
+                request_auto_farm_check(cfg)
+            except Exception as error:
+                log("auto farm check failed: {}: {}".format(type(error).__name__, error))
 
 
 if __name__ == "__main__":

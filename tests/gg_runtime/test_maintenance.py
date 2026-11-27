@@ -32,7 +32,7 @@ class MaintenanceTests(unittest.TestCase):
             STATE_PATH=str(self.root / "state.json"), LOCK_PATH=str(self.root / "maintenance.lock"),
             load_config=lambda: self.cfg, log=lambda line: None, gpu_memory=lambda: "test",
             api=self.api, manager_result=self.manager, ensure_webui=lambda cfg: True,
-            adb_booted=lambda cfg: True,
+            adb_booted=lambda cfg: True, request_auto_farm_check=lambda cfg: None,
         )
         mocks.start()
         self.addCleanup(mocks.stop)
