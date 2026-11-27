@@ -254,11 +254,11 @@ def _resource_loop(log_dir):
         try:
             if time.monotonic() >= next_reload:
                 _res_reload()
-                next_reload = time.monotonic() + 30
+                next_reload = time.monotonic() + 60
             _res_tail(log_dir)
         except Exception as error:
             _plog("resources: {}".format(error))
-        time.sleep(5)
+        time.sleep(10)
 
 
 def resource_state(config_name=None):
@@ -871,6 +871,25 @@ def memory_state(pid, multiplier, config_name=None):
     return out
 
 
+_PID_CACHE = {}
+_PID_TTL = 5.0
+
+
+def game_pid(serial, package):
+    """Cached game PID: avoid an adb shell round-trip on every panel poll."""
+    key = (serial, package)
+    now = time.monotonic()
+    hit = _PID_CACHE.get(key)
+    if hit and now - hit[0] < _PID_TTL:
+        return hit[1]
+    try:
+        pid = alas_gg.MemPatcher(serial=serial, package=package).get_pid()
+    except Exception:
+        pid = None
+    _PID_CACHE[key] = (now, pid)
+    return pid
+
+
 def get_state(config_path, log_dir, alas_port, config_name=None):
     cfg = load_config(config_path)
     instances = list_instances(config_path)
@@ -887,12 +906,7 @@ def get_state(config_path, log_dir, alas_port, config_name=None):
         if config_name
         else (None, "com.bilibili.azurlane")
     )
-    p = alas_gg.MemPatcher(serial=serial or alas_gg.DEFAULT_SERIAL, package=package)
-    pid = None
-    try:
-        pid = p.get_pid()
-    except Exception:
-        pass
+    pid = game_pid(serial or alas_gg.DEFAULT_SERIAL, package)
     mem = memory_state(pid, float(cfg["Multiplier"]), config_name) if pid else {
         "mode": "unknown", "value": None, "count": 0, "values": None, "cached": False,
     }
@@ -1120,7 +1134,7 @@ def _guard_loop(config_path, log_dir):
             orphan_guard_once(config_path, log_dir)
         except Exception as e:
             _plog(f"orphan guard error: {type(e).__name__}: {e}")
-        time.sleep(20)
+        time.sleep(60)
 
 
 # ---------------- HTTP ----------------

@@ -356,3 +356,14 @@ class TaskGroupTests(unittest.TestCase):
         group = panel.schedule_group_state(self.config_path, "sample")["groups"][1]
         self.assertTrue(group["master"])
         self.assertEqual(group["selected"], [])
+
+
+class PanelPidCacheTests(unittest.TestCase):
+    def test_game_pid_is_cached(self):
+        panel._PID_CACHE.clear()
+        self.addCleanup(panel._PID_CACHE.clear)
+        with patch.object(panel.alas_gg, "MemPatcher") as patcher:
+            patcher.return_value.get_pid.return_value = 123
+            self.assertEqual(panel.game_pid("serial", "package"), 123)
+            self.assertEqual(panel.game_pid("serial", "package"), 123)
+            self.assertEqual(patcher.return_value.get_pid.call_count, 1)

@@ -250,6 +250,7 @@ let draftTasks = {};
 let selectedConfig = "";
 let currentSettings = {};
 let refreshSeq = 0;
+let lastQuickSignature = "";
 
 function toast(msg, kind = "") {
   const el = $("toast");
@@ -340,9 +341,13 @@ function renderQuickGroups(sg) {
   if (!box) return;
   if (!sg || !sg.available) {
     box.innerHTML = '<div class="empty">请选择实例</div>';
+    lastQuickSignature = "";
     return;
   }
   const current = (state && state.alas && state.alas.task) || "";
+  const signature = JSON.stringify([sg, current]);
+  if (signature === lastQuickSignature && box.querySelector(".quick-item")) return;
+  lastQuickSignature = signature;
   box.innerHTML = sg.groups.map((g) => {
     const total = g.tasks.length;
     const selected = new Set(g.selected || []);
@@ -735,7 +740,7 @@ $("toggleExpand").addEventListener("click", () => {
 });
 
 refresh();
-setInterval(() => { if (!busy) refresh(); }, 2500);
+setInterval(() => { if (!busy) refresh(); }, 5000);
 </script>
 </body>
 </html>

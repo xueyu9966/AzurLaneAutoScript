@@ -44,6 +44,8 @@ CUSTOM_COIN_AREA = (715, 23, 798, 51)
 
 _WRITE_LOCK = threading.RLock()
 _MAX_BYTES = 20 * 1024 * 1024
+_LAST_SNAPSHOT = {}
+_SNAPSHOT_INTERVAL = 600
 
 
 def now_str():
@@ -271,26 +273,38 @@ def _custom_ocr(image):
 
 
 def snapshot_from_device(config, device, config_name, source="goto_main"):
-    """Use ALAS's own OCR after it has returned to the main page."""
+    """Use the current top-bar OCR after ALAS returns to the main page.
+
+    The standard ALAS OCR areas are stale on the current CN layout and cost
+    several failed screenshots per snapshot.  Use the custom areas first and
+    only fall back to the standard OCR if the custom areas fail.
+    """
     try:
-        from module.campaign.campaign_status import CampaignStatus
         from module.logger import logger
     except Exception:
         return None
 
+    last = _LAST_SNAPSHOT.get(config_name, 0)
+    if time.time() - last < _SNAPSHOT_INTERVAL:
+        return None
+
     try:
-        status = CampaignStatus(config=config, device=device)
-        oil = coin = 0
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 device.screenshot()
             except Exception:
                 time.sleep(1)
                 continue
-            oil = status.get_oil(skip_first_screenshot=True)
-            coin = status.get_coin(skip_first_screenshot=True)
+            oil, coin = _custom_ocr(device.image)
             if oil <= 0 or coin <= 0:
-                oil, coin = _custom_ocr(device.image)
+                try:
+                    from module.campaign.campaign_status import CampaignStatus
+
+                    status = CampaignStatus(config=config, device=device)
+                    oil = status.get_oil(skip_first_screenshot=True)
+                    coin = status.get_coin(skip_first_screenshot=True)
+                except Exception:
+                    pass
             if oil > 0 and coin > 0:
                 record = {
                     "time": now_str(),
@@ -302,6 +316,7 @@ def snapshot_from_device(config, device, config_name, source="goto_main"):
                 if not append_record(record):
                     logger.warning("GGResources: snapshot could not be saved")
                     return None
+                _LAST_SNAPSHOT[config_name] = time.time()
                 logger.info(
                     f"GGResources: {source} snapshot oil={oil} coin={coin}"
                 )
