@@ -264,6 +264,7 @@ class AutoFarmTests(unittest.TestCase):
             patch.object(panel, "AUTO_FARM_PATH", str(self.data_dir / "auto_farm.json")),
             patch.object(panel.alas_gg, "DATA_DIR", str(self.data_dir)),
             patch.object(panel, "_plog"),
+            patch.object(panel, "_instance_alive", side_effect=lambda *_: self.scheduler),
             patch.object(panel, "scheduler_running", side_effect=lambda *_, **__: self.scheduler),
             patch.object(panel, "resource_state", side_effect=lambda *_: {
                 "latest": {"oil": self.oil, "time": time.strftime("%Y-%m-%d %H:%M:%S")}

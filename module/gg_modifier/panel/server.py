@@ -1055,16 +1055,28 @@ def _disable_auto_farm_tasks(data, tasks):
         scheduler["Enable"] = False
 
 
+def _instance_alive(config_name):
+    """Ask the ALAS control API whether this scheduler instance is alive."""
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:22334/status", timeout=3
+        ) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return bool((data.get("instances") or {}).get(config_name, {}).get("alive"))
+    except Exception:
+        return None
+
+
 def auto_farm_check(config_path, config_name, log_dir):
     """Scheduled-task entry point: start Main/Main2 when oil is near 24k."""
     instance = _auto_farm_instance(config_path, config_name, log_dir)
     if not instance:
         return None
-    deadline = time.monotonic() + 5
-    while scheduler_running(log_dir, instance, fresh=True) is not True:
-        if time.monotonic() >= deadline:
-            return None
-        time.sleep(1)
+    alive = _instance_alive(instance)
+    if alive is None:
+        alive = scheduler_running(log_dir, instance, fresh=True)
+    if alive is not True:
+        return None
     path = _instance_config_path(config_path, instance)
     try:
         data = _load_instance_config(path)
